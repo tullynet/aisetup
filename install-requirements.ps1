@@ -43,7 +43,14 @@ function Save-ReleaseAsset {
 
     $target = Join-Path $Destination $asset.name
     Write-Host "Downloading $($asset.name) from $($Release.html_url)"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -UseBasicParsing
+    $webClient = New-Object Net.WebClient
+    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
+    try {
+        $webClient.DownloadFile($asset.browser_download_url, $target)
+    }
+    finally {
+        $webClient.Dispose()
+    }
 
     # GitHub exposes a SHA-256 digest on newer API responses. Verify it when present.
     if ($asset.digest -and $asset.digest -match '^sha256:([0-9a-fA-F]{64})$') {
