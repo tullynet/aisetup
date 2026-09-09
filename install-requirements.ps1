@@ -119,10 +119,21 @@ function Set-TerminalDefaultProfile {
         return
     }
 
-    $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-    $settings.defaultProfile = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
-    $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath -Encoding UTF8
-    Write-Host 'Set PowerShell 7 as the default Windows Terminal profile.' -ForegroundColor Green
+    try {
+        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        $settings.defaultProfile = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+
+        $temporarySettingsPath = "$settingsPath.aisetup.tmp"
+        $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporarySettingsPath -Encoding UTF8
+        Move-Item -LiteralPath $temporarySettingsPath -Destination $settingsPath -Force
+        Write-Host 'Set PowerShell 7 as the default Windows Terminal profile.' -ForegroundColor Green
+    }
+    catch {
+        if (Test-Path -LiteralPath $temporarySettingsPath) {
+            Remove-Item -LiteralPath $temporarySettingsPath -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host 'Windows Terminal is using settings.json. Close and reopen Terminal, then set PowerShell 7 as the default profile in Settings.' -ForegroundColor Yellow
+    }
 }
 
 function Pin-WindowsTerminalToTaskbar {
