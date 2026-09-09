@@ -81,7 +81,7 @@ function Install-WindowsTerminal {
     $bundle = Save-ReleaseAsset -Release $release -AssetPattern '^Microsoft\.WindowsTerminal_.*_8wekyb3d8bbwe\.msixbundle$' -Destination $DownloadDirectory
 
     Write-Host "Installing Windows Terminal $($release.tag_name)"
-    Add-AppxPackage -Path $bundle
+    Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
 }
 
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
