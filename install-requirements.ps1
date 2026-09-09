@@ -68,7 +68,7 @@ function Save-ReleaseAsset {
 
 function Install-PowerShell {
     $release = Get-LatestStableRelease -Repository $repositories.PowerShell
-    $bundle = Save-ReleaseAsset -Release $release -AssetPattern '^PowerShell-.*-win-x64\.msixbundle$' -Destination $DownloadDirectory
+    $bundle = Save-ReleaseAsset -Release $release -AssetPattern '^PowerShell-[0-9].*\.msixbundle$' -Destination $DownloadDirectory
 
     Write-Host "Installing PowerShell $($release.tag_name) for the current user"
     Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
