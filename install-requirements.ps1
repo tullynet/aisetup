@@ -33,11 +33,11 @@ function Get-LatestStableRelease {
 function Save-ReleaseAsset {
     param(
         [Parameter(Mandatory = $true)]$Release,
-        [Parameter(Mandatory = $true)][regex]$AssetPattern,
+        [Parameter(Mandatory = $true)][string]$AssetPattern,
         [Parameter(Mandatory = $true)][string]$Destination
     )
 
-    $asset = @($Release.assets | Where-Object { $_.name -match $AssetPattern }) | Select-Object -First 1
+    $asset = @($Release.assets | Where-Object { $_.name -like $AssetPattern }) | Select-Object -First 1
     if ($null -eq $asset) {
         throw "Could not find an asset matching '$AssetPattern' in release $($Release.tag_name)."
     }
@@ -66,9 +66,46 @@ function Save-ReleaseAsset {
     return $target
 }
 
+function Save-ReleaseAssetByName {
+    param(
+        [Parameter(Mandatory = $true)]$Release,
+        [Parameter(Mandatory = $true)][string]$AssetName,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $asset = @($Release.assets | Where-Object { $_.name -ceq $AssetName }) | Select-Object -First 1
+    if ($null -eq $asset) {
+        throw "Could not find the asset '$AssetName' in release $($Release.tag_name)."
+    }
+
+    $target = Join-Path $Destination $asset.name
+    Write-Host "Downloading $($asset.name) from $($Release.html_url)"
+    $webClient = New-Object Net.WebClient
+    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
+    try {
+        $webClient.DownloadFile($asset.browser_download_url, $target)
+    }
+    finally {
+        $webClient.Dispose()
+    }
+
+    if ($asset.digest -and $asset.digest -match '^sha256:([0-9a-fA-F]{64})$') {
+        $expected = $Matches[1].ToLowerInvariant()
+        $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "SHA-256 verification failed for $($asset.name)."
+        }
+        Write-Host "Verified SHA-256 for $($asset.name)"
+    }
+
+    return $target
+}
+
 function Install-PowerShell {
     $release = Get-LatestStableRelease -Repository $repositories.PowerShell
-    $bundle = Save-ReleaseAsset -Release $release -AssetPattern '^PowerShell-[0-9].*\.msixbundle$' -Destination $DownloadDirectory
+    $version = $release.tag_name -replace '^v', ''
+    $bundleName = "PowerShell-$version.msixbundle"
+    $bundle = Save-ReleaseAssetByName -Release $release -AssetName $bundleName -Destination $DownloadDirectory
 
     Write-Host "Installing PowerShell $($release.tag_name) for the current user"
     Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
@@ -77,7 +114,7 @@ function Install-PowerShell {
 
 function Install-WindowsTerminal {
     $release = Get-LatestStableRelease -Repository $repositories.Terminal
-    $installer = Save-ReleaseAsset -Release $release -AssetPattern '^Microsoft\.WindowsTerminal_.*_8wekyb3d8bbwe\.msixbundle$' -Destination $DownloadDirectory
+    $installer = Save-ReleaseAsset -Release $release -AssetPattern 'Microsoft.WindowsTerminal_*.msixbundle' -Destination $DownloadDirectory
 
     Write-Host "Installing Windows Terminal $($release.tag_name)"
     Add-AppxPackage -Path $installer -DeferRegistrationWhenPackagesAreInUse
@@ -85,7 +122,7 @@ function Install-WindowsTerminal {
 
 function Install-Git {
     $release = Get-LatestStableRelease -Repository $repositories.Git
-    $archive = Save-ReleaseAsset -Release $release -AssetPattern '^PortableGit-.*-64-bit\.7z\.exe$' -Destination $DownloadDirectory
+    $archive = Save-ReleaseAsset -Release $release -AssetPattern 'PortableGit-*-64-bit.7z.exe' -Destination $DownloadDirectory
     $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Git'
     $gitBinDirectory = Join-Path $installDirectory 'cmd'
 
