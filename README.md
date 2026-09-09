@@ -7,10 +7,8 @@ This repository contains a Windows PowerShell 5.1-compatible bootstrap script. I
 Open Windows PowerShell and run:
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/YOUR-OWNER/YOUR-REPOSITORY/main/install-requirements.ps1 | Invoke-Expression
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/tullynet/aisetup/main/install-requirements.ps1 | Invoke-Expression
 ```
-
-Replace `YOUR-OWNER/YOUR-REPOSITORY` with the GitHub repository that hosts this script.
 
 The command should be run from a normal, non-elevated PowerShell prompt. PowerShell 7 and Git are installed per user. Windows Terminal is installed with deferred registration when its current process is using the package, so the update takes effect the next time Terminal starts.
 
