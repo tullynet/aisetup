@@ -2,6 +2,7 @@
 #   Invoke-WebRequest -UseBasicParsing <URL> | Invoke-Expression
 # It intentionally uses only commands available in Windows PowerShell 5.1.
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DownloadDirectory = Join-Path $env:TEMP 'aisetup-downloads'
