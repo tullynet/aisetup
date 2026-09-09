@@ -6,7 +6,6 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DownloadDirectory = Join-Path $env:TEMP 'aisetup-downloads'
-$SetPowerShellAsDefault = $false
 
 $repositories = @{
     PowerShell = 'PowerShell/PowerShell'
@@ -111,16 +110,9 @@ function Install-PowerShell {
     Write-Host "Installing PowerShell $($release.tag_name) for the current user"
     Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
     Write-Host 'PowerShell 7 was installed. Restart Windows Terminal to load its dynamic profile.' -ForegroundColor Green
-
-    $answer = Read-Host 'Make PowerShell 7 the default Windows Terminal profile? [Y/N]'
-    $script:SetPowerShellAsDefault = $answer -match '^(y|yes)$'
 }
 
 function Set-TerminalDefaultProfile {
-    if (-not $SetPowerShellAsDefault) {
-        return
-    }
-
     $settingsPath = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'
     if (-not (Test-Path -LiteralPath $settingsPath)) {
         Write-Host 'Windows Terminal settings were not found; default profile was not changed.' -ForegroundColor Yellow
@@ -142,13 +134,13 @@ function Pin-WindowsTerminalToTaskbar {
         return
     }
 
-    $pinVerb = @($terminal.Verbs()) | Where-Object { $_.Name -match 'taskbar' } | Select-Object -First 1
+    $pinVerb = @($terminal.Verbs()) | Where-Object { $_.Name -match 'taskbar|pin' } | Select-Object -First 1
     if ($null -eq $pinVerb) {
-        Write-Host 'Windows did not expose a taskbar pin action for Windows Terminal.' -ForegroundColor Yellow
+        Write-Host 'Windows did not expose a taskbar pin action for Windows Terminal. Pin it manually from the Start menu if needed.' -ForegroundColor Yellow
         return
     }
 
-    $pinVerb.DoIt()
+    $pinVerb.DoIt() | Out-Null
     Write-Host 'Pinned Windows Terminal to the taskbar.' -ForegroundColor Green
 }
 
@@ -158,8 +150,6 @@ function Install-WindowsTerminal {
 
     Write-Host "Installing Windows Terminal $($release.tag_name)"
     Add-AppxPackage -Path $installer -DeferRegistrationWhenPackagesAreInUse
-    Set-TerminalDefaultProfile
-    Pin-WindowsTerminalToTaskbar
 }
 
 function Install-Git {
@@ -246,4 +236,16 @@ else {
     Write-Host "[FAIL] $($failed.Count) package installation(s) failed." -ForegroundColor Red
     Write-Host '       Failure details:' -ForegroundColor DarkRed
     $failed | ForEach-Object { Write-Host "       - $($_.Name): $($_.Details)" -ForegroundColor DarkRed }
+}
+
+$powerShellResult = @($results | Where-Object { $_.Name -eq 'PowerShell' -and $_.Status -eq 'Installed' })
+$terminalResult = @($results | Where-Object { $_.Name -eq 'Windows Terminal' -and $_.Status -eq 'Installed' })
+if ($powerShellResult.Count -gt 0 -and $terminalResult.Count -gt 0) {
+    Write-Host "`nWindows Terminal setup" -ForegroundColor Cyan
+    Write-Host '-----------------------' -ForegroundColor DarkGray
+    $answer = Read-Host 'Make PowerShell 7 the default Windows Terminal profile? [Y/N]'
+    if ($answer -match '^(y|yes)$') {
+        Set-TerminalDefaultProfile
+    }
+    Pin-WindowsTerminalToTaskbar
 }
