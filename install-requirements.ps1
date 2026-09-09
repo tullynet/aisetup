@@ -68,20 +68,11 @@ function Save-ReleaseAsset {
 
 function Install-PowerShell {
     $release = Get-LatestStableRelease -Repository $repositories.PowerShell
-    $archive = Save-ReleaseAsset -Release $release -AssetPattern '^PowerShell-.*-win-x64\.zip$' -Destination $DownloadDirectory
-    $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7'
-    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
+    $bundle = Save-ReleaseAsset -Release $release -AssetPattern '^PowerShell-.*-win-x64\.msixbundle$' -Destination $DownloadDirectory
 
     Write-Host "Installing PowerShell $($release.tag_name) for the current user"
-    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
-    Expand-Archive -LiteralPath $archive -DestinationPath $installDirectory -Force
-
-    if ($pathEntries -notcontains $installDirectory) {
-        $pathEntries += $installDirectory
-        [Environment]::SetEnvironmentVariable('Path', ($pathEntries -join ';'), 'User')
-    }
-
-    $env:Path = "$installDirectory;$env:Path"
+    Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
+    Write-Host 'PowerShell 7 was installed. Restart Windows Terminal to load its dynamic profile.' -ForegroundColor Green
 }
 
 function Install-WindowsTerminal {
