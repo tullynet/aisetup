@@ -10,6 +10,7 @@ $DownloadDirectory = Join-Path $env:TEMP 'aisetup-downloads'
 $repositories = @{
     PowerShell = 'PowerShell/PowerShell'
     Terminal   = 'microsoft/terminal'
+    Git        = 'git-for-windows/git'
 }
 
 function Get-LatestStableRelease {
@@ -67,26 +68,112 @@ function Save-ReleaseAsset {
 
 function Install-PowerShell {
     $release = Get-LatestStableRelease -Repository $repositories.PowerShell
-    $installer = Save-ReleaseAsset -Release $release -AssetPattern '^PowerShell-.*-win-x64\.msi$' -Destination $DownloadDirectory
+    $archive = Save-ReleaseAsset -Release $release -AssetPattern '^PowerShell-.*-win-x64\.zip$' -Destination $DownloadDirectory
+    $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7'
+    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
 
-    Write-Host "Installing PowerShell $($release.tag_name)"
-    $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $installer, '/qn', '/norestart') -Wait -PassThru
-    if ($process.ExitCode -notin @(0, 3010)) {
-        throw "PowerShell installation failed with exit code $($process.ExitCode)."
+    Write-Host "Installing PowerShell $($release.tag_name) for the current user"
+    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+    Expand-Archive -LiteralPath $archive -DestinationPath $installDirectory -Force
+
+    if ($pathEntries -notcontains $installDirectory) {
+        $pathEntries += $installDirectory
+        [Environment]::SetEnvironmentVariable('Path', ($pathEntries -join ';'), 'User')
     }
+
+    $env:Path = "$installDirectory;$env:Path"
 }
 
 function Install-WindowsTerminal {
     $release = Get-LatestStableRelease -Repository $repositories.Terminal
-    $bundle = Save-ReleaseAsset -Release $release -AssetPattern '^Microsoft\.WindowsTerminal_.*_8wekyb3d8bbwe\.msixbundle$' -Destination $DownloadDirectory
+    $installer = Save-ReleaseAsset -Release $release -AssetPattern '^Microsoft\.WindowsTerminal_.*_8wekyb3d8bbwe\.msixbundle$' -Destination $DownloadDirectory
 
     Write-Host "Installing Windows Terminal $($release.tag_name)"
-    Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
+    Add-AppxPackage -Path $installer -DeferRegistrationWhenPackagesAreInUse
+}
+
+function Install-Git {
+    $release = Get-LatestStableRelease -Repository $repositories.Git
+    $archive = Save-ReleaseAsset -Release $release -AssetPattern '^PortableGit-.*-64-bit\.7z\.exe$' -Destination $DownloadDirectory
+    $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Git'
+    $gitBinDirectory = Join-Path $installDirectory 'cmd'
+
+    Write-Host "Installing Git $($release.tag_name) for the current user"
+    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+    $process = Start-Process -FilePath $archive -ArgumentList @("-o$installDirectory", '-y') -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Git extraction failed with exit code $($process.ExitCode)."
+    }
+
+    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
+    if ($pathEntries -notcontains $gitBinDirectory) {
+        $pathEntries += $gitBinDirectory
+        [Environment]::SetEnvironmentVariable('Path', ($pathEntries -join ';'), 'User')
+    }
+    $env:Path = "$gitBinDirectory;$env:Path"
+}
+
+function Invoke-PackageInstallation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][scriptblock]$Installer,
+        [Parameter(Mandatory = $true)][int]$Number,
+        [Parameter(Mandatory = $true)][int]$Total
+    )
+
+    Write-Host "`n[$Number/$Total] $Name" -ForegroundColor Cyan
+    Write-Host ('-' * ($Name.Length + 8)) -ForegroundColor DarkGray
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+
+    try {
+        & $Installer
+        $timer.Stop()
+        Write-Host ('[OK]   Installed in {0:N1}s' -f $timer.Elapsed.TotalSeconds) -ForegroundColor Green
+        [pscustomobject]@{
+            Name    = $Name
+            Status  = 'Installed'
+            Details = ''
+            Time    = '{0:N1}s' -f $timer.Elapsed.TotalSeconds
+        }
+    }
+    catch {
+        $timer.Stop()
+        Write-Host ('[FAIL] Installation failed after {0:N1}s' -f $timer.Elapsed.TotalSeconds) -ForegroundColor Red
+        Write-Host "       $($_.Exception.Message)" -ForegroundColor DarkRed
+        [pscustomobject]@{
+            Name    = $Name
+            Status  = 'Failed'
+            Details = $_.Exception.Message
+            Time    = '{0:N1}s' -f $timer.Elapsed.TotalSeconds
+        }
+    }
 }
 
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
 
-Install-PowerShell
-Install-WindowsTerminal
+$packages = @(
+    [pscustomobject]@{ Name = 'PowerShell'; Installer = { Install-PowerShell } }
+    [pscustomobject]@{ Name = 'Windows Terminal'; Installer = { Install-WindowsTerminal } }
+    [pscustomobject]@{ Name = 'Git'; Installer = { Install-Git } }
+)
 
-Write-Host 'PowerShell 7 and stable Windows Terminal installation completed.' -ForegroundColor Green
+$totalPackages = $packages.Count
+$packageNumber = 0
+$results = foreach ($package in $packages) {
+    $packageNumber++
+    Invoke-PackageInstallation -Name $package.Name -Installer $package.Installer -Number $packageNumber -Total $totalPackages
+}
+
+Write-Host "`nInstallation Summary" -ForegroundColor Cyan
+Write-Host '--------------------' -ForegroundColor DarkGray
+$results | Select-Object Name, Status, Time | Format-Table -AutoSize
+
+$failed = @($results | Where-Object { $_.Status -eq 'Failed' })
+if ($failed.Count -eq 0) {
+    Write-Host '[OK] All package installations completed.' -ForegroundColor Green
+}
+else {
+    Write-Host "[FAIL] $($failed.Count) package installation(s) failed." -ForegroundColor Red
+    Write-Host '       Failure details:' -ForegroundColor DarkRed
+    $failed | ForEach-Object { Write-Host "       - $($_.Name): $($_.Details)" -ForegroundColor DarkRed }
+}
