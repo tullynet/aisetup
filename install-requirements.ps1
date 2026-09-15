@@ -1,7 +1,10 @@
 # This file is intended to be hosted at a trusted HTTPS URL and invoked with:
 #   Invoke-WebRequest -UseBasicParsing <URL> | Invoke-Expression
 # It intentionally uses only commands available in Windows PowerShell 5.1.
-param([switch]$Reinstall)
+param(
+    [switch]$Reinstall,
+    [switch]$SkipReinstallPrompt
+)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -52,7 +55,7 @@ Update-ProcessEnvironment
 Set-PreferredToolPathEntries
 Update-ProcessEnvironment
 
-if (-not $Reinstall) {
+if (-not $Reinstall -and -not $SkipReinstallPrompt) {
     $reinstallAnswer = Read-Host 'Reinstall all packages, even if already current? [y/N]'
     $Reinstall = $reinstallAnswer -match '^(y|yes)$'
 }
@@ -183,7 +186,7 @@ function Get-InstalledVersion {
             return $provider.Version.ToString()
         }
         'Microsoft.PowerShell.SecretManagement' {
-            $module = Get-InstalledModule -Name 'Microsoft.PowerShell.SecretManagement' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+            $module = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.SecretManagement' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
             if ($null -eq $module) { return $null }
             return $module.Version.ToString()
         }
@@ -194,8 +197,17 @@ function Get-InstalledVersion {
 function Get-LatestPowerShellModuleRelease {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    $module = Find-Module -Name $Name -Repository PSGallery -ErrorAction Stop
-    return [pscustomobject]@{ tag_name = $module.Version.ToString(); draft = $false; prerelease = $false }
+    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
+    if (-not (Test-Path -LiteralPath $pwsh)) {
+        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $command) { throw 'PowerShell 7 is required to query the PowerShell Gallery.' }
+        $pwsh = $command.Source
+    }
+    $version = & $pwsh -NoProfile -NonInteractive -Command "(Find-Module -Name '$Name' -Repository PSGallery -ErrorAction Stop).Version.ToString()" 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$version)) {
+        throw "Could not query the PowerShell Gallery for $Name using PowerShell 7."
+    }
+    return [pscustomobject]@{ tag_name = ([string]$version).Trim(); draft = $false; prerelease = $false }
 }
 
 function Install-NuGetProvider {
@@ -206,7 +218,16 @@ function Install-NuGetProvider {
 }
 
 function Install-SecretManagement {
-    Install-Module -Name 'Microsoft.PowerShell.SecretManagement' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:$false
+    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
+    if (-not (Test-Path -LiteralPath $pwsh)) {
+        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $command) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretManagement.' }
+        $pwsh = $command.Source
+    }
+    & $pwsh -NoProfile -NonInteractive -Command "Install-Module -Name 'Microsoft.PowerShell.SecretManagement' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:`$false"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Microsoft.PowerShell.SecretManagement installation failed with exit code $LASTEXITCODE."
+    }
 }
 
 function Test-PackageNeedsInstallation {
@@ -311,6 +332,34 @@ function Install-PowerShell {
     Write-Host "Installing PowerShell $($release.tag_name) for the current user"
     Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
     Write-Host 'PowerShell 7 was installed.' -ForegroundColor Green
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Start-InstallerInPowerShell7
+    }
+}
+
+function Start-InstallerInPowerShell7 {
+    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
+    if (-not (Test-Path -LiteralPath $pwsh)) {
+        throw 'PowerShell 7 was installed, but pwsh.exe could not be found.'
+    }
+
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass')
+    if ($PSCommandPath) {
+        $arguments += @('-File', $PSCommandPath)
+    }
+    else {
+        throw 'PowerShell 7 was installed, but the installer was not started from a script file and cannot be restarted automatically.'
+    }
+    if ($Reinstall) {
+        $arguments += '-Reinstall'
+    }
+    else {
+        $arguments += '-SkipReinstallPrompt'
+    }
+
+    Write-Host 'Restarting the installer under PowerShell 7.' -ForegroundColor Cyan
+    $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Wait -PassThru
+    exit $process.ExitCode
 }
 
 function Install-WindowsTerminal {
