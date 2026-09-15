@@ -3,7 +3,8 @@
 # It intentionally uses only commands available in Windows PowerShell 5.1.
 param(
     [switch]$Reinstall,
-    [switch]$SkipReinstallPrompt
+    [switch]$SkipReinstallPrompt,
+    [switch]$WaitForExit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,6 +13,17 @@ $ProgressPreference = 'SilentlyContinue'
 
 $DownloadDirectory = Join-Path $env:TEMP 'aisetup-downloads'
 $InstallerUrl = 'https://raw.githubusercontent.com/tullynet/aisetup/main/install-requirements.ps1'
+
+function Wait-ForInstallerExit {
+    if ($WaitForExit) {
+        Read-Host 'Press Enter to close this window' | Out-Null
+    }
+}
+
+trap {
+    Wait-ForInstallerExit
+    exit 1
+}
 
 function Update-ProcessEnvironment {
     $userEnvironment = [Environment]::GetEnvironmentVariables('User')
@@ -405,6 +417,7 @@ function Start-InstallerInPowerShell7 {
     else {
         $arguments += '-SkipReinstallPrompt'
     }
+    $arguments += '-WaitForExit'
 
     Write-Host 'Restarting the installer under PowerShell 7.' -ForegroundColor Cyan
     & $pwsh @arguments
@@ -765,3 +778,5 @@ if ($herdrPackage.Count -gt 0) {
     Set-HerdrDefaultShell
     Write-Host 'Herdr default shell configured as pwsh.exe.' -ForegroundColor Green
 }
+
+Wait-ForInstallerExit
