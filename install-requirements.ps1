@@ -1,24 +1,73 @@
 # This file is intended to be hosted at a trusted HTTPS URL and invoked with:
 #   Invoke-WebRequest -UseBasicParsing <URL> | Invoke-Expression
 # It intentionally uses only commands available in Windows PowerShell 5.1.
+param([switch]$Reinstall)
+
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DownloadDirectory = Join-Path $env:TEMP 'aisetup-downloads'
 
+function Update-ProcessEnvironment {
+    $userEnvironment = [Environment]::GetEnvironmentVariables('User')
+    $machineEnvironment = [Environment]::GetEnvironmentVariables('Machine')
+
+    foreach ($entry in $machineEnvironment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+    }
+    foreach ($entry in $userEnvironment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+    }
+
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$userPath;$machinePath"
+}
+
+function Set-PreferredToolPathEntries {
+    $preferredEntries = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Node.js'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\uv'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\OpenCode'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Herdr')
+    ) | Where-Object { Test-Path -LiteralPath $_ }
+
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' |
+        Where-Object { $_ }
+    $normalizedPreferredEntries = $preferredEntries | ForEach-Object { ($_ -replace '/', '\').TrimEnd('\') }
+    $remainingEntries = foreach ($entry in $userPath) {
+        $normalizedEntry = ($entry -replace '/', '\').TrimEnd('\')
+        if ($normalizedPreferredEntries -notcontains $normalizedEntry) {
+            $entry
+        }
+    }
+    $orderedEntries = @($preferredEntries) + @($remainingEntries)
+    [Environment]::SetEnvironmentVariable('Path', ($orderedEntries -join ';'), 'User')
+}
+
+Update-ProcessEnvironment
+Set-PreferredToolPathEntries
+Update-ProcessEnvironment
+
 $repositories = @{
     PowerShell = 'PowerShell/PowerShell'
     Terminal   = 'microsoft/terminal'
     Git        = 'git-for-windows/git'
+    Node       = 'nodejs/node'
+    Uv         = 'astral-sh/uv'
+    OpenCode   = 'anomalyco/opencode'
+    Herdr      = 'herdrdev/herdr'
 }
 
 function Get-LatestStableRelease {
     param([Parameter(Mandatory = $true)][string]$Repository)
 
     $headers = @{
-        Accept     = 'application/vnd.github+json'
-        'User-Agent' = 'WindowsPowerShell-requirements-installer'
+        Accept                 = 'application/vnd.github+json'
+        'User-Agent'           = 'WindowsPowerShell-requirements-installer'
         'X-GitHub-Api-Version' = '2022-11-28'
     }
     $uri = "https://api.github.com/repos/$Repository/releases/latest"
@@ -28,6 +77,123 @@ function Get-LatestStableRelease {
         throw "GitHub returned a non-stable release for ${Repository}: $($release.tag_name)"
     }
     return $release
+}
+
+function ConvertTo-NormalizedVersion {
+    param([AllowNull()][string]$Version)
+
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return $null
+    }
+
+    $numbers = [regex]::Matches($Version, '\d+') | ForEach-Object { [int]$_.Value }
+    if ($numbers.Count -eq 0) {
+        return $null
+    }
+
+    $parts = @(0, 0, 0, 0)
+    for ($index = 0; $index -lt [Math]::Min($numbers.Count, 4); $index++) {
+        $parts[$index] = $numbers[$index]
+    }
+    return [version]::new($parts[0], $parts[1], $parts[2], $parts[3])
+}
+
+function Get-AppxInstalledVersion {
+    param([Parameter(Mandatory = $true)][string]$PackageName)
+
+    $package = Get-AppxPackage -Name $PackageName | Sort-Object Version -Descending | Select-Object -First 1
+    if ($null -eq $package) {
+        return $null
+    }
+    return $package.Version.ToString()
+}
+
+function Get-CommandInstalledVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$CommandName,
+        [Parameter(Mandatory = $true)][string]$Arguments
+    )
+
+    $command = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $command) {
+        return $null
+    }
+
+    $output = & $command.Source $Arguments 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+    return [string]$output
+}
+
+function Get-ExecutableInstalledVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Arguments
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    $output = & $Path $Arguments 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+    return [string]$output
+}
+
+function Get-InstalledVersion {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    switch ($Name) {
+        'PowerShell' { return Get-AppxInstalledVersion -PackageName 'Microsoft.PowerShell' }
+        'Windows Terminal' { return Get-AppxInstalledVersion -PackageName 'Microsoft.WindowsTerminal' }
+        'Git' {
+            $output = Get-CommandInstalledVersion -CommandName 'git.exe' -Arguments '--version'
+            return $output -replace '^git version\s+', ''
+        }
+        'Node.js' {
+            $output = Get-ExecutableInstalledVersion -Path (Join-Path $env:LOCALAPPDATA 'Programs\Node.js\node.exe') -Arguments '--version'
+            if ($null -eq $output) { $output = Get-CommandInstalledVersion -CommandName 'node.exe' -Arguments '--version' }
+            return $output -replace '^v', ''
+        }
+        'uv' {
+            $output = Get-ExecutableInstalledVersion -Path (Join-Path $env:LOCALAPPDATA 'Programs\uv\uv.exe') -Arguments '--version'
+            return $output -replace '^uv\s+', ''
+        }
+        'OpenCode' {
+            $output = Get-ExecutableInstalledVersion -Path (Join-Path $env:LOCALAPPDATA 'Programs\OpenCode\opencode.exe') -Arguments '--version'
+            if ($null -eq $output) { $output = Get-CommandInstalledVersion -CommandName 'opencode.exe' -Arguments '--version' }
+            if ($null -eq $output) { return $null }
+            return $output.Trim()
+        }
+        'Herdr' {
+            $output = Get-ExecutableInstalledVersion -Path (Join-Path $env:LOCALAPPDATA 'Programs\Herdr\herdr.exe') -Arguments '--version'
+            if ($null -eq $output) { return $null }
+            return $output.Trim()
+        }
+    }
+    return $null
+}
+
+function Test-PackageNeedsInstallation {
+    param(
+        [Parameter(Mandatory = $true)]$Package,
+        [Parameter(Mandatory = $true)]$Release
+    )
+
+    $installedVersion = Get-InstalledVersion -Name $Package.Name
+    $latestVersion = ConvertTo-NormalizedVersion -Version $Release.tag_name
+    $normalizedInstalledVersion = ConvertTo-NormalizedVersion -Version $installedVersion
+    $Package.InstalledVersion = $installedVersion
+    $Package.LatestVersion = $Release.tag_name
+
+    if ($Reinstall -or $null -eq $normalizedInstalledVersion) {
+        $Package.NeedsInstall = $true
+        return
+    }
+
+    $Package.NeedsInstall = $normalizedInstalledVersion -lt $latestVersion
 }
 
 function Save-ReleaseAsset {
@@ -102,70 +268,22 @@ function Save-ReleaseAssetByName {
 }
 
 function Install-PowerShell {
-    $release = Get-LatestStableRelease -Repository $repositories.PowerShell
+    param([Parameter(Mandatory = $true)]$Release)
+
+    $release = $Release
     $version = $release.tag_name -replace '^v', ''
     $bundleName = "PowerShell-$version.msixbundle"
     $bundle = Save-ReleaseAssetByName -Release $release -AssetName $bundleName -Destination $DownloadDirectory
 
     Write-Host "Installing PowerShell $($release.tag_name) for the current user"
     Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
-    Write-Host 'PowerShell 7 was installed. Restart Windows Terminal to load its dynamic profile.' -ForegroundColor Green
-}
-
-function Set-TerminalDefaultProfile {
-    $settingsPath = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'
-    if (-not (Test-Path -LiteralPath $settingsPath)) {
-        Write-Host 'Windows Terminal settings were not found; default profile was not changed.' -ForegroundColor Yellow
-        return
-    }
-
-    $scriptText = @'
-$ErrorActionPreference = 'Stop'
-$settingsPath = '{0}'
-$temporarySettingsPath = "$settingsPath.aisetup.tmp"
-for ($attempt = 1; $attempt -le 60; $attempt++) {{
-    try {{
-        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-        $settings.defaultProfile = '{{574e775e-4f2a-5b96-ac1e-a2962a402336}}'
-        $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporarySettingsPath -Encoding UTF8
-        Move-Item -LiteralPath $temporarySettingsPath -Destination $settingsPath -Force
-        exit 0
-    }}
-    catch {{
-        if (Test-Path -LiteralPath $temporarySettingsPath) {{
-            Remove-Item -LiteralPath $temporarySettingsPath -Force -ErrorAction SilentlyContinue
-        }}
-        Start-Sleep -Seconds 2
-    }}
-}}
-'@ -f $settingsPath.Replace("'", "''")
-
-    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($scriptText))
-    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile', '-EncodedCommand', $encodedCommand)
-    Write-Host 'PowerShell 7 will be set as the default Terminal profile after Windows Terminal releases settings.json.' -ForegroundColor Green
-}
-
-function Pin-WindowsTerminalToTaskbar {
-    $shell = New-Object -ComObject Shell.Application
-    $appsFolder = $shell.Namespace('shell:AppsFolder')
-    $terminal = $appsFolder.ParseName('Microsoft.WindowsTerminal_8wekyb3d8bbwe!App')
-    if ($null -eq $terminal) {
-        Write-Host 'Windows Terminal was not found in the Apps folder; it was not pinned.' -ForegroundColor Yellow
-        return
-    }
-
-    $pinVerb = @($terminal.Verbs()) | Where-Object { $_.Name -match 'taskbar|pin' } | Select-Object -First 1
-    if ($null -eq $pinVerb) {
-        Write-Host 'Windows did not expose a taskbar pin action for Windows Terminal. Pin it manually from the Start menu if needed.' -ForegroundColor Yellow
-        return
-    }
-
-    $pinVerb.DoIt() | Out-Null
-    Write-Host 'Pinned Windows Terminal to the taskbar.' -ForegroundColor Green
+    Write-Host 'PowerShell 7 was installed.' -ForegroundColor Green
 }
 
 function Install-WindowsTerminal {
-    $release = Get-LatestStableRelease -Repository $repositories.Terminal
+    param([Parameter(Mandatory = $true)]$Release)
+
+    $release = $Release
     $installer = Save-ReleaseAsset -Release $release -AssetPattern 'Microsoft.WindowsTerminal_*.msixbundle' -Destination $DownloadDirectory
 
     Write-Host "Installing Windows Terminal $($release.tag_name)"
@@ -173,14 +291,16 @@ function Install-WindowsTerminal {
 }
 
 function Install-Git {
-    $release = Get-LatestStableRelease -Repository $repositories.Git
+    param([Parameter(Mandatory = $true)]$Release)
+
+    $release = $Release
     $archive = Save-ReleaseAsset -Release $release -AssetPattern 'PortableGit-*-64-bit.7z.exe' -Destination $DownloadDirectory
     $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Git'
     $gitBinDirectory = Join-Path $installDirectory 'cmd'
 
     Write-Host "Installing Git $($release.tag_name) for the current user"
     New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
-    $process = Start-Process -FilePath $archive -ArgumentList @("-o$installDirectory", '-y') -Wait -PassThru
+    $process = Start-Process -FilePath $archive -ArgumentList @("-o$installDirectory", '-y', '-bd') -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "Git extraction failed with exit code $($process.ExitCode)."
     }
@@ -193,10 +313,125 @@ function Install-Git {
     $env:Path = "$gitBinDirectory;$env:Path"
 }
 
+function Install-Node {
+    param([Parameter(Mandatory = $true)]$Release)
+
+    $release = $Release
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+        'arm64'
+    }
+    elseif ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64' -or $env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
+        'x64'
+    }
+    else {
+        throw 'Node.js installation requires x64 or ARM64 Windows.'
+    }
+    $version = $release.tag_name -replace '^v', ''
+    $archiveName = "node-v{0}-win-{1}.zip" -f $version, $architecture
+    $archive = Join-Path $DownloadDirectory $archiveName
+    $archiveUri = "https://nodejs.org/dist/v$version/$archiveName"
+
+    Write-Host "Downloading $archiveName from $archiveUri"
+    $webClient = New-Object Net.WebClient
+    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
+    try {
+        $webClient.DownloadFile($archiveUri, $archive)
+    }
+    finally {
+        $webClient.Dispose()
+    }
+
+    $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Node.js'
+    $extractDirectory = Join-Path $DownloadDirectory "node-extract-$version"
+    if (Test-Path -LiteralPath $extractDirectory) {
+        Remove-Item -LiteralPath $extractDirectory -Recurse -Force
+    }
+    Expand-Archive -LiteralPath $archive -DestinationPath $extractDirectory -Force
+    $extractedRoot = Join-Path $extractDirectory ("node-v{0}-win-{1}" -f $version, $architecture)
+    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+    Copy-Item -Path (Join-Path $extractedRoot '*') -Destination $installDirectory -Recurse -Force
+
+    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
+    if ($pathEntries -notcontains $installDirectory) {
+        $pathEntries += $installDirectory
+        [Environment]::SetEnvironmentVariable('Path', ($pathEntries -join ';'), 'User')
+    }
+}
+
+function Add-UserPathEntry {
+    param([Parameter(Mandatory = $true)][string]$PathEntry)
+
+    $normalizedEntry = ($PathEntry -replace '/', '\').TrimEnd('\')
+    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' |
+        Where-Object {
+            $candidate = ($_ -replace '/', '\').TrimEnd('\')
+            $_ -and $candidate -ine $normalizedEntry
+        }
+    $newPathEntries = @($PathEntry) + @($pathEntries)
+    [Environment]::SetEnvironmentVariable('Path', ($newPathEntries -join ';'), 'User')
+    Update-ProcessEnvironment
+}
+
+function Install-Uv {
+    param([Parameter(Mandatory = $true)]$Release)
+
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+        'aarch64'
+    }
+    elseif ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64' -or $env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
+        'x86_64'
+    }
+    else {
+        throw 'uv installation requires x64 or ARM64 Windows.'
+    }
+    $archive = Save-ReleaseAsset -Release $Release -AssetPattern ("uv-{0}-pc-windows-msvc.zip" -f $architecture) -Destination $DownloadDirectory
+    $extractDirectory = Join-Path $DownloadDirectory 'uv-extract'
+    if (Test-Path -LiteralPath $extractDirectory) { Remove-Item -LiteralPath $extractDirectory -Recurse -Force }
+    Expand-Archive -LiteralPath $archive -DestinationPath $extractDirectory -Force
+    $binary = Get-ChildItem -LiteralPath $extractDirectory -Filter 'uv.exe' -Recurse | Select-Object -First 1
+    if ($null -eq $binary) { throw 'uv.exe was not found in the downloaded archive.' }
+    $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\uv'
+    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $installDirectory 'uv.exe') -Force
+    Add-UserPathEntry -PathEntry $installDirectory
+}
+
+function Install-OpenCode {
+    param([Parameter(Mandatory = $true)]$Release)
+
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+    $archive = Save-ReleaseAsset -Release $Release -AssetPattern ("opencode-windows-{0}.zip" -f $architecture) -Destination $DownloadDirectory
+    $extractDirectory = Join-Path $DownloadDirectory 'opencode-extract'
+    if (Test-Path -LiteralPath $extractDirectory) { Remove-Item -LiteralPath $extractDirectory -Recurse -Force }
+    Expand-Archive -LiteralPath $archive -DestinationPath $extractDirectory -Force
+    $binary = Get-ChildItem -LiteralPath $extractDirectory -Filter 'opencode.exe' -Recurse | Select-Object -First 1
+    if ($null -eq $binary) { throw 'opencode.exe was not found in the downloaded archive.' }
+    $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\OpenCode'
+    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $installDirectory 'opencode.exe') -Force
+    Add-UserPathEntry -PathEntry $installDirectory
+}
+
+function Install-Herdr {
+    param([Parameter(Mandatory = $true)]$Release)
+
+    $archive = Save-ReleaseAsset -Release $Release -AssetPattern 'herdr-windows-x86_64.zip' -Destination $DownloadDirectory
+    $extractDirectory = Join-Path $DownloadDirectory 'herdr-extract'
+    if (Test-Path -LiteralPath $extractDirectory) { Remove-Item -LiteralPath $extractDirectory -Recurse -Force }
+    Expand-Archive -LiteralPath $archive -DestinationPath $extractDirectory -Force
+    $binary = Get-ChildItem -LiteralPath $extractDirectory -Filter 'herdr.exe' -Recurse | Select-Object -First 1
+    if ($null -eq $binary) { throw 'herdr.exe was not found in the downloaded archive.' }
+    $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Herdr'
+    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $installDirectory 'herdr.exe') -Force
+    Add-UserPathEntry -PathEntry $installDirectory
+}
+
 function Invoke-PackageInstallation {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][scriptblock]$Installer,
+        [Parameter()][object[]]$ArgumentList = @(),
         [Parameter(Mandatory = $true)][int]$Number,
         [Parameter(Mandatory = $true)][int]$Total
     )
@@ -206,7 +441,7 @@ function Invoke-PackageInstallation {
     $timer = [Diagnostics.Stopwatch]::StartNew()
 
     try {
-        & $Installer
+        & $Installer @ArgumentList
         $timer.Stop()
         Write-Host ('[OK]   Installed in {0:N1}s' -f $timer.Elapsed.TotalSeconds) -ForegroundColor Green
         [pscustomobject]@{
@@ -232,16 +467,55 @@ function Invoke-PackageInstallation {
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
 
 $packages = @(
-    [pscustomobject]@{ Name = 'PowerShell'; Installer = { Install-PowerShell } }
-    [pscustomobject]@{ Name = 'Windows Terminal'; Installer = { Install-WindowsTerminal } }
-    [pscustomobject]@{ Name = 'Git'; Installer = { Install-Git } }
+    [pscustomobject]@{ Name = 'PowerShell'; Repository = $repositories.PowerShell; Installer = { param($release) Install-PowerShell -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Windows Terminal'; Repository = $repositories.Terminal; Installer = { param($release) Install-WindowsTerminal -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Git'; Repository = $repositories.Git; Installer = { param($release) Install-Git -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Node.js'; Repository = $repositories.Node; Installer = { param($release) Install-Node -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'uv'; Repository = $repositories.Uv; Installer = { param($release) Install-Uv -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'OpenCode'; Repository = $repositories.OpenCode; Installer = { param($release) Install-OpenCode -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Herdr'; Repository = $repositories.Herdr; Installer = { param($release) Install-Herdr -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
 )
 
-$totalPackages = $packages.Count
+$preflightFailed = @()
+foreach ($package in $packages) {
+    try {
+        $release = Get-LatestStableRelease -Repository $package.Repository
+        $package.Release = $release
+        Test-PackageNeedsInstallation -Package $package -Release $release
+    }
+    catch {
+        $package.PreflightError = $_.Exception.Message
+        $preflightFailed += $package
+    }
+}
+
+Write-Host "`nPreflight Checks" -ForegroundColor Cyan
+Write-Host '----------------' -ForegroundColor DarkGray
+foreach ($package in $packages) {
+    if ($package.PreflightError) {
+        Write-Host "[FAIL] $($package.Name): $($package.PreflightError)" -ForegroundColor Red
+    }
+    elseif (-not $package.NeedsInstall) {
+        Write-Host "[SKIP] $($package.Name) $($package.InstalledVersion) is already current ($($package.LatestVersion))." -ForegroundColor Green
+    }
+    else {
+        $installed = if ($package.InstalledVersion) { $package.InstalledVersion } else { 'not installed' }
+        Write-Host "[INSTALL] $($package.Name): installed=$installed, latest=$($package.LatestVersion)" -ForegroundColor Yellow
+    }
+}
+
+$packagesToInstall = @($packages | Where-Object { $_.NeedsInstall -and -not $_.PreflightError })
+$totalPackages = $packagesToInstall.Count
 $packageNumber = 0
-$results = foreach ($package in $packages) {
+$results = @(
+    foreach ($package in $packagesToInstall) {
     $packageNumber++
-    Invoke-PackageInstallation -Name $package.Name -Installer $package.Installer -Number $packageNumber -Total $totalPackages
+    Invoke-PackageInstallation -Name $package.Name -Installer $package.Installer -Number $packageNumber -Total $totalPackages -ArgumentList @($package.Release)
+    }
+)
+
+$results += $preflightFailed | ForEach-Object {
+    [pscustomobject]@{ Name = $_.Name; Status = 'Failed'; Details = $_.PreflightError; Time = 'n/a' }
 }
 
 Write-Host "`nInstallation Summary" -ForegroundColor Cyan
@@ -258,14 +532,7 @@ else {
     $failed | ForEach-Object { Write-Host "       - $($_.Name): $($_.Details)" -ForegroundColor DarkRed }
 }
 
-$powerShellResult = @($results | Where-Object { $_.Name -eq 'PowerShell' -and $_.Status -eq 'Installed' })
-$terminalResult = @($results | Where-Object { $_.Name -eq 'Windows Terminal' -and $_.Status -eq 'Installed' })
-if ($powerShellResult.Count -gt 0 -and $terminalResult.Count -gt 0) {
-    Write-Host "`nWindows Terminal setup" -ForegroundColor Cyan
-    Write-Host '-----------------------' -ForegroundColor DarkGray
-    $answer = Read-Host 'Make PowerShell 7 the default Windows Terminal profile? [Y/N]'
-    if ($answer -match '^(y|yes)$') {
-        Set-TerminalDefaultProfile
-    }
-    Pin-WindowsTerminalToTaskbar
-}
+Update-ProcessEnvironment
+Set-PreferredToolPathEntries
+Update-ProcessEnvironment
+Write-Host 'Environment variables refreshed.' -ForegroundColor Green
