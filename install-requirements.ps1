@@ -433,6 +433,27 @@ function Install-Herdr {
     Set-HerdrDefaultShell
 }
 
+function Stop-RunningHerdr {
+    $processes = @(Get-Process -Name 'herdr' -ErrorAction SilentlyContinue)
+    if ($processes.Count -eq 0) {
+        return
+    }
+
+    Write-Host 'Stopping running Herdr processes before reinstall.' -ForegroundColor Yellow
+    $processes | Stop-Process -Force
+    foreach ($process in $processes) {
+        try {
+            $process.WaitForExit(5000)
+        }
+        catch {
+            throw "Could not stop Herdr process $($process.Id): $($_.Exception.Message)"
+        }
+        if (-not $process.HasExited) {
+            throw "Could not stop Herdr process $($process.Id)."
+        }
+    }
+}
+
 function Set-HerdrDefaultShell {
     $configDirectory = Join-Path $env:APPDATA 'herdr'
     $configPath = Join-Path $configDirectory 'config.toml'
@@ -544,6 +565,9 @@ foreach ($package in $packages) {
 }
 
 $packagesToInstall = @($packages | Where-Object { $_.NeedsInstall -and -not $_.PreflightError })
+if ($Reinstall -and @($packagesToInstall | Where-Object { $_.Name -eq 'Herdr' }).Count -gt 0) {
+    Stop-RunningHerdr
+}
 $totalPackages = $packagesToInstall.Count
 $packageNumber = 0
 $results = @(
