@@ -11,6 +11,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DownloadDirectory = Join-Path $env:TEMP 'aisetup-downloads'
+$InstallerUrl = 'https://raw.githubusercontent.com/tullynet/aisetup/main/install-requirements.ps1'
 
 function Update-ProcessEnvironment {
     $userEnvironment = [Environment]::GetEnvironmentVariables('User')
@@ -350,7 +351,11 @@ function Start-InstallerInPowerShell7 {
         $arguments += @('-File', $PSCommandPath)
     }
     else {
-        throw 'PowerShell 7 was installed, but the installer was not started from a script file and cannot be restarted automatically.'
+        $temporaryScript = Join-Path $env:TEMP ('aisetup-continue-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        Write-Host 'Downloading a temporary copy to continue under PowerShell 7.' -ForegroundColor Cyan
+        $scriptContent = (Invoke-WebRequest -UseBasicParsing $InstallerUrl).Content
+        [IO.File]::WriteAllText($temporaryScript, $scriptContent, [Text.Encoding]::UTF8)
+        $arguments += @('-File', $temporaryScript)
     }
     if ($Reinstall) {
         $arguments += '-Reinstall'
@@ -360,8 +365,8 @@ function Start-InstallerInPowerShell7 {
     }
 
     Write-Host 'Restarting the installer under PowerShell 7.' -ForegroundColor Cyan
-    $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Wait -PassThru
-    exit $process.ExitCode
+    & $pwsh @arguments
+    exit $LASTEXITCODE
 }
 
 function Ensure-PowerShell7Execution {
