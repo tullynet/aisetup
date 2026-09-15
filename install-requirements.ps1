@@ -177,8 +177,36 @@ function Get-InstalledVersion {
             if ($null -eq $output) { return $null }
             return $output.Trim()
         }
+        'NuGet provider' {
+            $provider = Get-PackageProvider -Name 'NuGet' -ListAvailable -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+            if ($null -eq $provider) { return $null }
+            return $provider.Version.ToString()
+        }
+        'Microsoft.PowerShell.SecretManagement' {
+            $module = Get-InstalledModule -Name 'Microsoft.PowerShell.SecretManagement' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+            if ($null -eq $module) { return $null }
+            return $module.Version.ToString()
+        }
     }
     return $null
+}
+
+function Get-LatestPowerShellModuleRelease {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $module = Find-Module -Name $Name -Repository PSGallery -ErrorAction Stop
+    return [pscustomobject]@{ tag_name = $module.Version.ToString(); draft = $false; prerelease = $false }
+}
+
+function Install-NuGetProvider {
+    $provider = Get-PackageProvider -Name 'NuGet' -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $provider) {
+        Install-PackageProvider -Name 'NuGet' -Scope CurrentUser -Force -Confirm:$false
+    }
+}
+
+function Install-SecretManagement {
+    Install-Module -Name 'Microsoft.PowerShell.SecretManagement' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:$false
 }
 
 function Test-PackageNeedsInstallation {
@@ -526,6 +554,13 @@ function Invoke-PackageInstallation {
 
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
 
+try {
+    Install-NuGetProvider
+}
+catch {
+    throw "NuGet provider installation failed: $($_.Exception.Message)"
+}
+
 $packages = @(
     [pscustomobject]@{ Name = 'PowerShell'; Repository = $repositories.PowerShell; Installer = { param($release) Install-PowerShell -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
     [pscustomobject]@{ Name = 'Windows Terminal'; Repository = $repositories.Terminal; Installer = { param($release) Install-WindowsTerminal -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
@@ -534,12 +569,18 @@ $packages = @(
     [pscustomobject]@{ Name = 'uv'; Repository = $repositories.Uv; Installer = { param($release) Install-Uv -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
     [pscustomobject]@{ Name = 'OpenCode'; Repository = $repositories.OpenCode; Installer = { param($release) Install-OpenCode -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
     [pscustomobject]@{ Name = 'Herdr'; Repository = $repositories.Herdr; Installer = { param($release) Install-Herdr -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretManagement'; Repository = $null; Installer = { param($release) Install-SecretManagement }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
 )
 
 $preflightFailed = @()
 foreach ($package in $packages) {
     try {
-        $release = Get-LatestStableRelease -Repository $package.Repository
+        $release = if ($package.Name -eq 'Microsoft.PowerShell.SecretManagement') {
+            Get-LatestPowerShellModuleRelease -Name $package.Name
+        }
+        else {
+            Get-LatestStableRelease -Repository $package.Repository
+        }
         $package.Release = $release
         Test-PackageNeedsInstallation -Package $package -Release $release
     }

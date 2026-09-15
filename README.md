@@ -27,6 +27,8 @@ The command should be run from a normal, non-elevated PowerShell prompt. The scr
 - Latest stable uv Windows release from `astral-sh/uv`
 - Latest stable OpenCode Windows release from `anomalyco/opencode`
 - Latest stable Herdr Windows x64 release from `herdrdev/herdr`
+- NuGet package provider for the current user
+- `Microsoft.PowerShell.SecretManagement` PowerShell module for the current user
 
 When Herdr is installed, the script creates or updates `%APPDATA%\herdr\config.toml` so new interactive panes use `pwsh.exe` by default.
 
