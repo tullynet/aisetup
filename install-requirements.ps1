@@ -347,15 +347,15 @@ function Start-InstallerInPowerShell7 {
     }
 
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass')
-    if ($PSCommandPath) {
-        $arguments += @('-File', $PSCommandPath)
-    }
-    else {
-        $temporaryScript = Join-Path $env:TEMP ('aisetup-continue-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    $scriptPath = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        $scriptPath = Join-Path $env:TEMP ('aisetup-continue-' + [guid]::NewGuid().ToString('N') + '.ps1')
         Write-Host 'Downloading a temporary copy to continue under PowerShell 7.' -ForegroundColor Cyan
         $scriptContent = (Invoke-WebRequest -UseBasicParsing $InstallerUrl).Content
-        [IO.File]::WriteAllText($temporaryScript, $scriptContent, [Text.Encoding]::UTF8)
-        $arguments += @('-File', $temporaryScript)
+        [IO.File]::WriteAllText($scriptPath, $scriptContent, [Text.Encoding]::UTF8)
+    }
+    if ($scriptPath) {
+        $arguments += @('-File', $scriptPath)
     }
     if ($Reinstall) {
         $arguments += '-Reinstall'
