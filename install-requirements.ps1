@@ -193,6 +193,11 @@ function Get-InstalledVersion {
             if ($null -eq $module) { return $null }
             return $module.Version.ToString()
         }
+        'Microsoft.PowerShell.SecretStore' {
+            $module = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.SecretStore' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+            if ($null -eq $module) { return $null }
+            return $module.Version.ToString()
+        }
     }
     return $null
 }
@@ -221,13 +226,24 @@ function Install-NuGetProvider {
         $pwsh = $command.Source
     }
 
+    $packageManagementTemp = Join-Path $env:TEMP ('aisetup-packagemanagement-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $packageManagementTemp -Force | Out-Null
+    Remove-Item -LiteralPath (Join-Path $env:TEMP 'Microsoft.PackageManagement') -Recurse -Force -ErrorAction SilentlyContinue
     $commandText = @'
+$env:TEMP = '__PACKAGE_MANAGEMENT_TEMP__'
+$env:TMP = '__PACKAGE_MANAGEMENT_TEMP__'
 $provider = Get-PackageProvider -Name 'NuGet' -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -eq $provider) {
-    Install-PackageProvider -Name 'NuGet' -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop | Out-Null
+    Install-PackageProvider -Name 'NuGet' -Scope CurrentUser -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
 }
 '@
-    & $pwsh -NoProfile -NonInteractive -Command $commandText
+    $commandText = $commandText.Replace('__PACKAGE_MANAGEMENT_TEMP__', $packageManagementTemp.Replace("'", "''"))
+    try {
+        & $pwsh -NoProfile -NonInteractive -Command $commandText
+    }
+    finally {
+        Remove-Item -LiteralPath $packageManagementTemp -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "NuGet provider installation failed with exit code $LASTEXITCODE."
     }
@@ -243,6 +259,19 @@ function Install-SecretManagement {
     & $pwsh -NoProfile -NonInteractive -Command "Install-Module -Name 'Microsoft.PowerShell.SecretManagement' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:`$false"
     if ($LASTEXITCODE -ne 0) {
         throw "Microsoft.PowerShell.SecretManagement installation failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Install-SecretStore {
+    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
+    if (-not (Test-Path -LiteralPath $pwsh)) {
+        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $command) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretStore.' }
+        $pwsh = $command.Source
+    }
+    & $pwsh -NoProfile -NonInteractive -Command "Install-Module -Name 'Microsoft.PowerShell.SecretStore' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:`$false"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Microsoft.PowerShell.SecretStore installation failed with exit code $LASTEXITCODE."
     }
 }
 
@@ -659,6 +688,7 @@ $packages = @(
     [pscustomobject]@{ Name = 'OpenCode'; Repository = $repositories.OpenCode; Installer = { param($release) Install-OpenCode -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
     [pscustomobject]@{ Name = 'Herdr'; Repository = $repositories.Herdr; Installer = { param($release) Install-Herdr -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
     [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretManagement'; Repository = $null; Installer = { param($release) Install-SecretManagement }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretStore'; Repository = $null; Installer = { param($release) Install-SecretStore }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
 )
 
 $preflightFailed = @()
