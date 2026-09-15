@@ -434,24 +434,24 @@ function Install-Herdr {
 }
 
 function Stop-RunningHerdr {
-    $processes = @(Get-Process -Name 'herdr' -ErrorAction SilentlyContinue)
-    if ($processes.Count -eq 0) {
+    $herdr = Get-Command herdr.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $herdr) {
         return
     }
 
     Write-Host 'Stopping running Herdr processes before reinstall.' -ForegroundColor Yellow
-    $processes | Stop-Process -Force
-    foreach ($process in $processes) {
-        try {
-            $process.WaitForExit(5000)
+    & $herdr.Source server stop 2>$null | Out-Null
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 250
+        $running = @(Get-Process -Name 'herdr' -ErrorAction SilentlyContinue)
+        if ($running.Count -eq 0) {
+            return
         }
-        catch {
-            throw "Could not stop Herdr process $($process.Id): $($_.Exception.Message)"
-        }
-        if (-not $process.HasExited) {
-            throw "Could not stop Herdr process $($process.Id)."
-        }
-    }
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw 'Herdr server did not stop within 10 seconds.'
 }
 
 function Set-HerdrDefaultShell {
