@@ -214,9 +214,22 @@ function Get-LatestPowerShellModuleRelease {
 }
 
 function Install-NuGetProvider {
-    $provider = Get-PackageProvider -Name 'NuGet' -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $provider) {
-        Install-PackageProvider -Name 'NuGet' -Scope CurrentUser -Force -Confirm:$false
+    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
+    if (-not (Test-Path -LiteralPath $pwsh)) {
+        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $command) { throw 'PowerShell 7 is required to install the NuGet provider.' }
+        $pwsh = $command.Source
+    }
+
+    $commandText = @'
+$provider = Get-PackageProvider -Name 'NuGet' -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $provider) {
+    Install-PackageProvider -Name 'NuGet' -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop | Out-Null
+}
+'@
+    & $pwsh -NoProfile -NonInteractive -Command $commandText
+    if ($LASTEXITCODE -ne 0) {
+        throw "NuGet provider installation failed with exit code $LASTEXITCODE."
     }
 }
 
