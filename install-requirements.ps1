@@ -362,6 +362,25 @@ function Start-InstallerInPowerShell7 {
     exit $process.ExitCode
 }
 
+function Ensure-PowerShell7Execution {
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        return
+    }
+
+    Write-Host 'PowerShell 5.x detected. Installing or switching to PowerShell 7 before package management.' -ForegroundColor Yellow
+    $release = Get-LatestStableRelease -Repository $repositories.PowerShell
+    $installedVersion = Get-AppxInstalledVersion -PackageName 'Microsoft.PowerShell'
+    $needsInstall = $Reinstall -or $null -eq (ConvertTo-NormalizedVersion -Version $installedVersion) -or
+        (ConvertTo-NormalizedVersion -Version $installedVersion) -lt (ConvertTo-NormalizedVersion -Version $release.tag_name)
+
+    if ($needsInstall) {
+        Install-PowerShell -Release $release
+    }
+    else {
+        Start-InstallerInPowerShell7
+    }
+}
+
 function Install-WindowsTerminal {
     param([Parameter(Mandatory = $true)]$Release)
 
@@ -602,6 +621,7 @@ function Invoke-PackageInstallation {
 }
 
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
+Ensure-PowerShell7Execution
 
 try {
     Install-NuGetProvider
