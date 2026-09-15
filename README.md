@@ -16,7 +16,7 @@ Use `-Reinstall` to run every installer regardless of the installed version:
 & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/tullynet/aisetup/main/install-requirements.ps1).Content)) -Reinstall
 ```
 
-The command should be run from a normal, non-elevated PowerShell prompt. The script refreshes the current process environment from the User and Machine environment stores before checking versions, so recently installed commands and PATH entries are available without opening a new terminal. It then checks each package's installed version against the latest stable GitHub release before downloading anything, and skips packages that are already current. PowerShell 7 and Git are installed per user. Windows Terminal is installed with deferred registration when its current process is using the package, so the update takes effect the next time Terminal starts.
+The command should be run from a normal, non-elevated PowerShell prompt. The script asks whether all packages should be reinstalled, then refreshes the current process environment from the User and Machine environment stores before checking versions, so recently installed commands and PATH entries are available without opening a new terminal. It checks each package's installed version against the latest stable GitHub release before downloading anything, and skips packages that are already current unless reinstall was selected. PowerShell 7 and Git are installed per user. Windows Terminal is installed with deferred registration when its current process is using the package, so the update takes effect the next time Terminal starts.
 
 ## Installs
 
@@ -27,5 +27,7 @@ The command should be run from a normal, non-elevated PowerShell prompt. The scr
 - Latest stable uv Windows release from `astral-sh/uv`
 - Latest stable OpenCode Windows release from `anomalyco/opencode`
 - Latest stable Herdr Windows x64 release from `herdrdev/herdr`
+
+When Herdr is installed, the script creates or updates `%APPDATA%\herdr\config.toml` so new interactive panes use `pwsh.exe` by default.
 
 The script continues after an individual package failure and prints an installation summary at the end.

@@ -52,6 +52,11 @@ Update-ProcessEnvironment
 Set-PreferredToolPathEntries
 Update-ProcessEnvironment
 
+if (-not $Reinstall) {
+    $reinstallAnswer = Read-Host 'Reinstall all packages, even if already current? [y/N]'
+    $Reinstall = $reinstallAnswer -match '^(y|yes)$'
+}
+
 $repositories = @{
     PowerShell = 'PowerShell/PowerShell'
     Terminal   = 'microsoft/terminal'
@@ -425,6 +430,40 @@ function Install-Herdr {
     New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
     Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $installDirectory 'herdr.exe') -Force
     Add-UserPathEntry -PathEntry $installDirectory
+    Set-HerdrDefaultShell
+}
+
+function Set-HerdrDefaultShell {
+    $configDirectory = Join-Path $env:APPDATA 'herdr'
+    $configPath = Join-Path $configDirectory 'config.toml'
+    $terminalConfig = @'
+[terminal]
+# Executable used for new interactive panes.
+# Empty means $SHELL, then /bin/sh.
+default_shell = "pwsh.exe"
+'@
+
+    New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        Set-Content -LiteralPath $configPath -Value $terminalConfig -Encoding UTF8
+        return
+    }
+
+    $config = Get-Content -LiteralPath $configPath -Raw
+    if ($config -match '(?m)^\s*default_shell\s*=') {
+        $config = [regex]::Replace($config, '(?m)^\s*default_shell\s*=.*$', 'default_shell = "pwsh.exe"')
+    }
+    elseif ($config -match '(?m)^\[terminal\]\s*$') {
+        $config = [regex]::Replace(
+            $config,
+            '(?ms)(^\[terminal\]\s*\r?\n)(.*?)(?=^\[|\z)',
+            ('$1$2' + "# Executable used for new interactive panes.`r`n# Empty means `$SHELL, then /bin/sh.`r`ndefault_shell = `"pwsh.exe`"`r`n")
+        )
+    }
+    else {
+        $config = $config.TrimEnd() + "`r`n`r`n" + $terminalConfig
+    }
+    Set-Content -LiteralPath $configPath -Value $config -Encoding UTF8
 }
 
 function Invoke-PackageInstallation {
@@ -536,3 +575,9 @@ Update-ProcessEnvironment
 Set-PreferredToolPathEntries
 Update-ProcessEnvironment
 Write-Host 'Environment variables refreshed.' -ForegroundColor Green
+
+$herdrPackage = @($packages | Where-Object { $_.Name -eq 'Herdr' -and -not $_.PreflightError -and $_.InstalledVersion })
+if ($herdrPackage.Count -gt 0) {
+    Set-HerdrDefaultShell
+    Write-Host 'Herdr default shell configured as pwsh.exe.' -ForegroundColor Green
+}
