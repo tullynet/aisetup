@@ -57,7 +57,9 @@ Update-ProcessEnvironment
 
 if (-not $Reinstall -and -not $SkipReinstallPrompt) {
     $reinstallAnswer = Read-Host 'Reinstall all packages, even if already current? [y/N]'
-    $Reinstall = $reinstallAnswer -match '^(y|yes)$'
+    if ($reinstallAnswer -match '^(y|yes)$') {
+        $Reinstall = $true
+    }
 }
 
 $repositories = @{
