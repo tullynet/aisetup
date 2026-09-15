@@ -694,7 +694,7 @@ $packages = @(
 $preflightFailed = @()
 foreach ($package in $packages) {
     try {
-        $release = if ($package.Name -eq 'Microsoft.PowerShell.SecretManagement') {
+        $release = if ($package.Name -in @('Microsoft.PowerShell.SecretManagement', 'Microsoft.PowerShell.SecretStore')) {
             Get-LatestPowerShellModuleRelease -Name $package.Name
         }
         else {
