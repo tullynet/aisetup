@@ -201,17 +201,29 @@ function Get-InstalledVersion {
             return $provider.Version.ToString()
         }
         'Microsoft.PowerShell.SecretManagement' {
-            $module = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.SecretManagement' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
-            if ($null -eq $module) { return $null }
-            return $module.Version.ToString()
+            return Get-PowerShellModuleInstalledVersion -Name 'Microsoft.PowerShell.SecretManagement'
         }
         'Microsoft.PowerShell.SecretStore' {
-            $module = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.SecretStore' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
-            if ($null -eq $module) { return $null }
-            return $module.Version.ToString()
+            return Get-PowerShellModuleInstalledVersion -Name 'Microsoft.PowerShell.SecretStore'
         }
     }
     return $null
+}
+
+function Get-PowerShellModuleInstalledVersion {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
+    if (-not (Test-Path -LiteralPath $pwsh)) {
+        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $command) { return $null }
+        $pwsh = $command.Source
+    }
+
+    $commandText = "`$module = Get-Module -ListAvailable -Name '$Name' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1; if (`$null -ne `$module) { `$module.Version.ToString() }"
+    $version = & $pwsh -NoProfile -NonInteractive -Command $commandText 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$version)) { return $null }
+    return ([string]$version).Trim()
 }
 
 function Get-LatestPowerShellModuleRelease {
