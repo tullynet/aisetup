@@ -645,6 +645,29 @@ default_shell = "pwsh.exe"
     Set-Content -LiteralPath $configPath -Value $config -Encoding UTF8
 }
 
+function Set-PowerShellProfileEntries {
+    $profilePath = $PROFILE.CurrentUserAllHosts
+    $profileDirectory = Split-Path -Parent $profilePath
+    $profileEntries = @(
+        '$env:NETAPP_OPENCODE_USER = $env:USERNAME'
+        '$env:NETAPP_OPENCODE_API_KEY = try { $(get-secret NETAPP_OPENCODE_API_KEY -AsPlainText -ErrorAction SilentlyContinue) } catch { $null }'
+    )
+
+    New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null
+    if (Test-Path -LiteralPath $profilePath) {
+        $profile = Get-Content -LiteralPath $profilePath -Raw
+    }
+    else {
+        $profile = ''
+    }
+    foreach ($entry in $profileEntries) {
+        if ($profile -notmatch [regex]::Escape($entry)) {
+            $profile = $profile.TrimEnd() + "`r`n" + $entry + "`r`n"
+        }
+    }
+    Set-Content -LiteralPath $profilePath -Value $profile -Encoding UTF8
+}
+
 function Invoke-PackageInstallation {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -778,5 +801,8 @@ if ($herdrPackage.Count -gt 0) {
     Set-HerdrDefaultShell
     Write-Host 'Herdr default shell configured as pwsh.exe.' -ForegroundColor Green
 }
+
+Set-PowerShellProfileEntries
+Write-Host 'PowerShell profile entries configured.' -ForegroundColor Green
 
 Wait-ForInstallerExit
