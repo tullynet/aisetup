@@ -299,6 +299,28 @@ function Install-SecretStore {
     }
 }
 
+function Configure-SecretStore {
+    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
+    if (-not (Test-Path -LiteralPath $pwsh)) {
+        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $command) { throw 'PowerShell 7 is required to configure SecretStore.' }
+        $pwsh = $command.Source
+    }
+
+    $commandText = @'
+Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
+Import-Module Microsoft.PowerShell.SecretStore -ErrorAction Stop
+if ($null -eq (Get-SecretVault -Name SecretStore -ErrorAction SilentlyContinue)) {
+    Register-SecretVault -Name SecretStore -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault -ErrorAction Stop
+}
+Set-SecretStoreConfiguration -Authentication None -Interaction None -Scope CurrentUser -Confirm:$false -ErrorAction Stop
+'@
+    & $pwsh -NoProfile -NonInteractive -Command $commandText
+    if ($LASTEXITCODE -ne 0) {
+        throw "SecretStore configuration failed with exit code $LASTEXITCODE."
+    }
+}
+
 function Test-PackageNeedsInstallation {
     param(
         [Parameter(Mandatory = $true)]$Package,
@@ -816,5 +838,13 @@ if ($herdrPackage.Count -gt 0) {
 
 Set-PowerShellProfileEntries
 Write-Host 'PowerShell profile entries configured.' -ForegroundColor Green
+
+try {
+    Configure-SecretStore
+    Write-Host 'SecretStore vault configured.' -ForegroundColor Green
+}
+catch {
+    Write-Host "[FAIL] SecretStore configuration: $($_.Exception.Message)" -ForegroundColor Red
+}
 
 Wait-ForInstallerExit
