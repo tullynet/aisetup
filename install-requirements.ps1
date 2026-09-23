@@ -244,7 +244,7 @@ function Install-NuGetProvider {
 
     $providerDirectory = Split-Path -Parent $providerPath
     New-Item -ItemType Directory -Path $providerDirectory -Force | Out-Null
-    $providerUri = 'https://onegetcdn.azureedge.net/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll'
+    $providerUri = 'https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll'
     $webClient = New-Object Net.WebClient
     $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
     try {
