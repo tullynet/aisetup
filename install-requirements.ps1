@@ -166,6 +166,11 @@ function Get-ExecutableInstalledVersion {
     return [string]$output
 }
 
+function Get-PowerShell7Path {
+    if ($PSVersionTable.PSVersion.Major -lt 7) { return $null }
+    return (Join-Path $PSHOME 'pwsh.exe')
+}
+
 function Get-InstalledVersion {
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -214,42 +219,23 @@ function Get-InstalledVersion {
 function Get-PowerShellModuleInstalledVersion {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $pwsh)) {
-        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $command) { return $null }
-        $pwsh = $command.Source
-    }
-
-    $commandText = "`$module = Get-Module -ListAvailable -Name '$Name' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1; if (`$null -ne `$module) { `$module.Version.ToString() }"
-    $version = & $pwsh -NoProfile -NonInteractive -Command $commandText 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$version)) { return $null }
-    return ([string]$version).Trim()
+    if ($PSVersionTable.PSVersion.Major -lt 7) { return $null }
+    $module = Get-Module -ListAvailable -Name $Name -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
+    if ($null -eq $module) { return $null }
+    return $module.Version.ToString()
 }
 
 function Get-LatestPowerShellModuleRelease {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $pwsh)) {
-        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $command) { throw 'PowerShell 7 is required to query the PowerShell Gallery.' }
-        $pwsh = $command.Source
-    }
-    $version = & $pwsh -NoProfile -NonInteractive -Command "(Find-Module -Name '$Name' -Repository PSGallery -ErrorAction Stop).Version.ToString()" 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$version)) {
-        throw "Could not query the PowerShell Gallery for $Name using PowerShell 7."
-    }
-    return [pscustomobject]@{ tag_name = ([string]$version).Trim(); draft = $false; prerelease = $false }
+    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to query the PowerShell Gallery.' }
+    $module = Find-Module -Name $Name -Repository PSGallery -ErrorAction Stop
+    return [pscustomobject]@{ tag_name = $module.Version.ToString(); draft = $false; prerelease = $false }
 }
 
 function Install-NuGetProvider {
-    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $pwsh)) {
-        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $command) { throw 'PowerShell 7 is required to install the NuGet provider.' }
-        $pwsh = $command.Source
-    }
+    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install the NuGet provider.' }
 
     $packageManagementTemp = Join-Path $env:TEMP ('aisetup-packagemanagement-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $packageManagementTemp -Force | Out-Null
@@ -264,7 +250,7 @@ if ($null -eq $provider) {
 '@
     $commandText = $commandText.Replace('__PACKAGE_MANAGEMENT_TEMP__', $packageManagementTemp.Replace("'", "''"))
     try {
-        & $pwsh -NoProfile -NonInteractive -Command $commandText
+        Invoke-Expression $commandText
     }
     finally {
         Remove-Item -LiteralPath $packageManagementTemp -Recurse -Force -ErrorAction SilentlyContinue
@@ -275,38 +261,17 @@ if ($null -eq $provider) {
 }
 
 function Install-SecretManagement {
-    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $pwsh)) {
-        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $command) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretManagement.' }
-        $pwsh = $command.Source
-    }
-    & $pwsh -NoProfile -NonInteractive -Command "Install-Module -Name 'Microsoft.PowerShell.SecretManagement' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:`$false"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Microsoft.PowerShell.SecretManagement installation failed with exit code $LASTEXITCODE."
-    }
+    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretManagement.' }
+    Install-Module -Name 'Microsoft.PowerShell.SecretManagement' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:$false -ErrorAction Stop
 }
 
 function Install-SecretStore {
-    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $pwsh)) {
-        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $command) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretStore.' }
-        $pwsh = $command.Source
-    }
-    & $pwsh -NoProfile -NonInteractive -Command "Install-Module -Name 'Microsoft.PowerShell.SecretStore' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:`$false"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Microsoft.PowerShell.SecretStore installation failed with exit code $LASTEXITCODE."
-    }
+    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretStore.' }
+    Install-Module -Name 'Microsoft.PowerShell.SecretStore' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:$false -ErrorAction Stop
 }
 
 function Configure-SecretStore {
-    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $pwsh)) {
-        $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $command) { throw 'PowerShell 7 is required to configure SecretStore.' }
-        $pwsh = $command.Source
-    }
+    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to configure SecretStore.' }
 
     $commandText = @'
 Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
@@ -316,10 +281,7 @@ if ($null -eq (Get-SecretVault -Name SecretStore -ErrorAction SilentlyContinue))
 }
 Set-SecretStoreConfiguration -Authentication None -Interaction None -Scope CurrentUser -Confirm:$false -ErrorAction Stop
 '@
-    & $pwsh -NoProfile -NonInteractive -Command $commandText
-    if ($LASTEXITCODE -ne 0) {
-        throw "SecretStore configuration failed with exit code $LASTEXITCODE."
-    }
+    Invoke-Expression $commandText
 }
 
 function Test-PackageNeedsInstallation {
