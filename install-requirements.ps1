@@ -202,9 +202,8 @@ function Get-InstalledVersion {
             return $output.Trim()
         }
         'NuGet provider' {
-            $provider = Get-PackageProvider -Name 'NuGet' -ListAvailable -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
-            if ($null -eq $provider) { return $null }
-            return $provider.Version.ToString()
+            if (Test-Path -LiteralPath (Get-NuGetProviderPath)) { return '2.8.5.208' }
+            return $null
         }
         'Microsoft.PowerShell.SecretManagement' {
             return Get-PowerShellModuleInstalledVersion -Name 'Microsoft.PowerShell.SecretManagement'
@@ -238,48 +237,29 @@ function Install-NuGetProvider {
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install the NuGet provider.' }
 
     $providerVersion = '2.8.5.208'
-    $providerDirectory = Join-Path $env:LOCALAPPDATA "PackageManagement\ProviderAssemblies\NuGet\$providerVersion"
-    $providerPath = Join-Path $providerDirectory 'Microsoft.PackageManagement.NuGetProvider.dll'
+    $providerPath = Get-NuGetProviderPath
     if (Test-Path -LiteralPath $providerPath) {
         return
     }
 
-    $packageManagementTemp = Join-Path $env:TEMP ('aisetup-packagemanagement-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $packageManagementTemp -Force | Out-Null
-    Remove-Item -LiteralPath (Join-Path $env:TEMP 'Microsoft.PackageManagement') -Recurse -Force -ErrorAction SilentlyContinue
-    $commandText = @'
-$env:TEMP = '__PACKAGE_MANAGEMENT_TEMP__'
-$env:TMP = '__PACKAGE_MANAGEMENT_TEMP__'
-$provider = Get-PackageProvider -Name 'NuGet' -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($null -eq $provider) {
-    Install-PackageProvider -Name 'NuGet' -Scope CurrentUser -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
-}
-'@
-    $commandText = $commandText.Replace('__PACKAGE_MANAGEMENT_TEMP__', $packageManagementTemp.Replace("'", "''"))
+    $providerDirectory = Split-Path -Parent $providerPath
+    New-Item -ItemType Directory -Path $providerDirectory -Force | Out-Null
+    $providerUri = 'https://onegetcdn.azureedge.net/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll'
+    $webClient = New-Object Net.WebClient
+    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
     try {
-        try {
-            Invoke-Expression $commandText
-        }
-        catch {
-            Write-Host 'PackageManagement bootstrap failed; downloading the NuGet provider directly.' -ForegroundColor Yellow
-            New-Item -ItemType Directory -Path $providerDirectory -Force | Out-Null
-            $providerUri = 'https://onegetcdn.azureedge.net/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll'
-            $webClient = New-Object Net.WebClient
-            $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
-            try {
-                $webClient.DownloadFile($providerUri, $providerPath)
-            }
-            finally {
-                $webClient.Dispose()
-            }
-        }
+        $webClient.DownloadFile($providerUri, $providerPath)
     }
     finally {
-        Remove-Item -LiteralPath $packageManagementTemp -Recurse -Force -ErrorAction SilentlyContinue
+        $webClient.Dispose()
     }
     if (-not (Test-Path -LiteralPath $providerPath)) {
-        throw 'NuGet provider installation failed: the provider DLL was not installed.'
+        throw 'NuGet provider installation failed: the current-user provider DLL was not installed.'
     }
+}
+
+function Get-NuGetProviderPath {
+    return Join-Path $env:LOCALAPPDATA 'PackageManagement\ProviderAssemblies\NuGet\2.8.5.208\Microsoft.PackageManagement.NuGetProvider.dll'
 }
 
 function Install-SecretManagement {
