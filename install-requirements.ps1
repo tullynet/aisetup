@@ -9,10 +9,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$ConfirmPreference = 'None'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DownloadDirectory = Join-Path $env:TEMP 'aisetup-downloads'
 $InstallerUrl = 'https://raw.githubusercontent.com/tullynet/aisetup/main/install-requirements.ps1'
+$PortablePowerShellRoot = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell'
+$UserModuleRoot = Join-Path $env:LOCALAPPDATA 'PowerShell\Modules'
 
 function Wait-ForInstallerExit {
     if ($WaitForExit) {
@@ -44,13 +47,13 @@ function Update-ProcessEnvironment {
 
 function Set-PreferredToolPathEntries {
     $preferredEntries = @(
-        (Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7'),
+        (Get-PortablePowerShellInstallDirectory),
         (Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Node.js'),
         (Join-Path $env:LOCALAPPDATA 'Programs\uv'),
         (Join-Path $env:LOCALAPPDATA 'Programs\OpenCode'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Herdr')
-    ) | Where-Object { Test-Path -LiteralPath $_ }
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
 
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' |
         Where-Object { $_ }
@@ -65,9 +68,179 @@ function Set-PreferredToolPathEntries {
     [Environment]::SetEnvironmentVariable('Path', ($orderedEntries -join ';'), 'User')
 }
 
+function Add-UserPathEntry {
+    param([Parameter(Mandatory = $true)][string]$PathEntry)
+
+    $normalizedEntry = ($PathEntry -replace '/', '\').TrimEnd('\')
+    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' |
+        Where-Object {
+            $candidate = ($_ -replace '/', '\').TrimEnd('\')
+            $_ -and $candidate -ine $normalizedEntry
+        }
+    $newPathEntries = @($PathEntry) + @($pathEntries)
+    [Environment]::SetEnvironmentVariable('Path', ($newPathEntries -join ';'), 'User')
+    Update-ProcessEnvironment
+}
+
+function ConvertTo-NormalizedVersion {
+    param([AllowNull()][string]$Version)
+
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return $null
+    }
+
+    $numbers = [regex]::Matches($Version, '\d+') | ForEach-Object { [int]$_.Value }
+    if ($numbers.Count -eq 0) {
+        return $null
+    }
+
+    $parts = @(0, 0, 0, 0)
+    for ($index = 0; $index -lt [Math]::Min($numbers.Count, 4); $index++) {
+        $parts[$index] = $numbers[$index]
+    }
+    return [version]::new($parts[0], $parts[1], $parts[2], $parts[3])
+}
+
+function Test-RealExecutable {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    if ($Path -match '(?i)\\WindowsApps\\') {
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    return ($null -ne $item -and -not $item.PSIsContainer -and $item.Length -gt 0)
+}
+
+function Get-PortablePowerShellInstallDirectory {
+    if (-not (Test-Path -LiteralPath $PortablePowerShellRoot)) {
+        return $null
+    }
+
+    $versionDirectories = @(Get-ChildItem -LiteralPath $PortablePowerShellRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match '^\d+\.\d+' -and
+            (Test-RealExecutable -Path (Join-Path $_.FullName 'pwsh.exe'))
+        })
+    $latestDirectory = $versionDirectories |
+        Sort-Object { ConvertTo-NormalizedVersion -Version $_.Name } -Descending |
+        Select-Object -First 1
+    if ($latestDirectory) {
+        return $latestDirectory.FullName
+    }
+
+    $legacyDirectory = Join-Path $PortablePowerShellRoot '7'
+    if (Test-RealExecutable -Path (Join-Path $legacyDirectory 'pwsh.exe')) {
+        return $legacyDirectory
+    }
+    return $null
+}
+
+function Get-PwshExecutable {
+    $portableDirectory = Get-PortablePowerShellInstallDirectory
+    $candidates = @()
+    if ($portableDirectory) {
+        $candidates += (Join-Path $portableDirectory 'pwsh.exe')
+    }
+    $candidates += (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')
+    if ($PSVersionTable.PSVersion.Major -ge 7 -and $PSHOME) {
+        $candidates += (Join-Path $PSHOME 'pwsh.exe')
+    }
+    $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and $command.Source) {
+        $candidates += $command.Source
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-RealExecutable -Path $candidate) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Save-RemoteFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $destinationDirectory = Split-Path -Parent $Destination
+    if ($destinationDirectory -and -not (Test-Path -LiteralPath $destinationDirectory)) {
+        New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+    }
+
+    $lastError = $null
+    foreach ($attempt in 1..3) {
+        $webClient = $null
+        try {
+            $webClient = New-Object Net.WebClient
+            $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
+            $webClient.DownloadFile($Uri, $Destination)
+            if (Test-Path -LiteralPath $Destination) {
+                Unblock-File -LiteralPath $Destination -ErrorAction SilentlyContinue
+                return
+            }
+            throw "Download produced no file: $Uri"
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt 3) {
+                Start-Sleep -Seconds (2 * $attempt)
+            }
+        }
+        finally {
+            if ($null -ne $webClient) {
+                $webClient.Dispose()
+            }
+        }
+    }
+    throw "Failed to download $Uri : $($lastError.Exception.Message)"
+}
+
+function Expand-ZipArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$Archive,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $extractDirectory = Join-Path $DownloadDirectory ('extract-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $extractDirectory -Force | Out-Null
+    try {
+        Expand-Archive -LiteralPath $Archive -DestinationPath $extractDirectory -Force
+        $items = @(Get-ChildItem -LiteralPath $extractDirectory)
+        $source = $extractDirectory
+        if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+            $source = $items[0].FullName
+        }
+        if (Test-Path -LiteralPath $Destination) {
+            try {
+                Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction Stop
+            }
+            catch {
+                Copy-Item -Path (Join-Path $source '*') -Destination $Destination -Recurse -Force
+                return
+            }
+        }
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        Copy-Item -Path (Join-Path $source '*') -Destination $Destination -Recurse -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $extractDirectory) {
+            Remove-Item -LiteralPath $extractDirectory -Recurse -Force
+        }
+    }
+}
+
 Update-ProcessEnvironment
 Set-PreferredToolPathEntries
 Update-ProcessEnvironment
+$env:PSModulePath = "$UserModuleRoot;$env:PSModulePath"
 
 if (-not $Reinstall -and -not $SkipReinstallPrompt) {
     $reinstallAnswer = Read-Host 'Reinstall all packages, even if already current? [y/N]'
@@ -103,25 +276,6 @@ function Get-LatestStableRelease {
     return $release
 }
 
-function ConvertTo-NormalizedVersion {
-    param([AllowNull()][string]$Version)
-
-    if ([string]::IsNullOrWhiteSpace($Version)) {
-        return $null
-    }
-
-    $numbers = [regex]::Matches($Version, '\d+') | ForEach-Object { [int]$_.Value }
-    if ($numbers.Count -eq 0) {
-        return $null
-    }
-
-    $parts = @(0, 0, 0, 0)
-    for ($index = 0; $index -lt [Math]::Min($numbers.Count, 4); $index++) {
-        $parts[$index] = $numbers[$index]
-    }
-    return [version]::new($parts[0], $parts[1], $parts[2], $parts[3])
-}
-
 function Get-AppxInstalledVersion {
     param([Parameter(Mandatory = $true)][string]$PackageName)
 
@@ -138,7 +292,9 @@ function Get-CommandInstalledVersion {
         [Parameter(Mandatory = $true)][string]$Arguments
     )
 
-    $command = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+    $command = Get-Command $CommandName -ErrorAction SilentlyContinue |
+        Where-Object { Test-RealExecutable -Path $_.Source } |
+        Select-Object -First 1
     if ($null -eq $command) {
         return $null
     }
@@ -156,7 +312,7 @@ function Get-ExecutableInstalledVersion {
         [Parameter(Mandatory = $true)][string]$Arguments
     )
 
-    if (-not (Test-Path -LiteralPath $Path)) {
+    if (-not (Test-RealExecutable -Path $Path)) {
         return $null
     }
     $output = & $Path $Arguments 2>$null
@@ -166,16 +322,21 @@ function Get-ExecutableInstalledVersion {
     return [string]$output
 }
 
-function Get-PowerShell7Path {
-    if ($PSVersionTable.PSVersion.Major -lt 7) { return $null }
-    return (Join-Path $PSHOME 'pwsh.exe')
+function Get-WindowsArchitecture {
+    if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+        return 'arm64'
+    }
+    if ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64' -or $env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
+        return 'x64'
+    }
+    throw 'This installer requires x64 or ARM64 Windows.'
 }
 
 function Get-InstalledVersion {
     param([Parameter(Mandatory = $true)][string]$Name)
 
     switch ($Name) {
-        'PowerShell' { return Get-AppxInstalledVersion -PackageName 'Microsoft.PowerShell' }
+        'PowerShell' { return Get-PortablePowerShellVersion }
         'Windows Terminal' { return Get-AppxInstalledVersion -PackageName 'Microsoft.WindowsTerminal' }
         'Git' {
             $output = Get-CommandInstalledVersion -CommandName 'git.exe' -Arguments '--version'
@@ -201,10 +362,6 @@ function Get-InstalledVersion {
             if ($null -eq $output) { return $null }
             return $output.Trim()
         }
-        'NuGet provider' {
-            if (Test-Path -LiteralPath (Get-NuGetProviderPath)) { return '2.8.5.208' }
-            return $null
-        }
         'Microsoft.PowerShell.SecretManagement' {
             return Get-PowerShellModuleInstalledVersion -Name 'Microsoft.PowerShell.SecretManagement'
         }
@@ -215,71 +372,119 @@ function Get-InstalledVersion {
     return $null
 }
 
+function Get-PortablePowerShellVersion {
+    $portableDirectory = Get-PortablePowerShellInstallDirectory
+    if (-not $portableDirectory) {
+        return $null
+    }
+    $pwsh = Join-Path $portableDirectory 'pwsh.exe'
+    if (-not (Test-RealExecutable -Path $pwsh)) {
+        return $null
+    }
+
+    $versionInfo = (Get-Item -LiteralPath $pwsh).VersionInfo
+    foreach ($candidate in @($versionInfo.ProductVersion, $versionInfo.FileVersion)) {
+        if ($candidate -match '^\d+\.\d+\.\d+') {
+            return $Matches[0]
+        }
+    }
+    return $null
+}
+
 function Get-PowerShellModuleInstalledVersion {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    if ($PSVersionTable.PSVersion.Major -lt 7) { return $null }
-    $module = Get-Module -ListAvailable -Name $Name -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending | Select-Object -First 1
-    if ($null -eq $module) { return $null }
-    return $module.Version.ToString()
-}
+    $moduleDirectory = Join-Path $UserModuleRoot $Name
+    if (-not (Test-Path -LiteralPath $moduleDirectory)) {
+        return $null
+    }
 
-function Get-CurrentUserModuleDirectory {
-    $profileRoot = [IO.Path]::GetFullPath($HOME).TrimEnd('\')
-    $moduleDirectory = $env:PSModulePath -split ';' |
-        Where-Object {
-            if ([string]::IsNullOrWhiteSpace($_)) { return $false }
-            $candidate = [IO.Path]::GetFullPath($_).TrimEnd('\')
-            $candidate.StartsWith($profileRoot, [StringComparison]::OrdinalIgnoreCase) -and
-                $candidate -match '\\Documents\\(PowerShell|WindowsPowerShell)\\Modules$'
-        } |
-        Select-Object -First 1
-    if ($moduleDirectory) { return $moduleDirectory }
-    return (Join-Path $HOME 'Documents\PowerShell\Modules')
+    $manifests = @(Get-ChildItem -LiteralPath $moduleDirectory -Filter "$Name.psd1" -Recurse -ErrorAction SilentlyContinue)
+    foreach ($manifest in ($manifests | Sort-Object FullName -Descending)) {
+        $data = Import-PowerShellDataFile -Path $manifest.FullName
+        if ($data.ModuleVersion) {
+            return [string]$data.ModuleVersion
+        }
+    }
+    return $null
 }
 
 function Get-LatestPowerShellModuleRelease {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to query the PowerShell Gallery.' }
-    $uri = "https://www.powershellgallery.com/api/v2/FindPackagesById()?id='$Name'"
-    $packages = Invoke-RestMethod -Uri $uri -UseBasicParsing -ErrorAction Stop
-    $versions = @($packages | ForEach-Object {
-        $version = $_.properties.Version
-        if ($version) { ConvertTo-NormalizedVersion -Version ([string]$version) }
-    } | Where-Object { $null -ne $_ } | Sort-Object -Descending)
-    if ($versions.Count -eq 0) { throw "Could not find $Name in the PowerShell Gallery." }
-    return [pscustomobject]@{ tag_name = $versions[0].ToString(); draft = $false; prerelease = $false }
+    $uri = "https://www.powershellgallery.com/api/v2/Packages?`$filter=Id eq '$Name' and IsLatestVersion eq true"
+    $feed = Invoke-RestMethod -Uri $uri -UseBasicParsing
+    $entry = $null
+    if ($feed.entry) {
+        $entry = @($feed.entry)[0]
+    }
+    elseif ($feed.properties) {
+        $entry = $feed
+    }
+    else {
+        $entry = @($feed)[0]
+    }
+    $version = $null
+    if ($entry.properties.NormalizedVersion) {
+        $version = [string]$entry.properties.NormalizedVersion
+    }
+    elseif ($entry.properties.Version) {
+        $version = [string]$entry.properties.Version
+    }
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "Could not find $Name in the PowerShell Gallery."
+    }
+    return [pscustomobject]@{ tag_name = $version; draft = $false; prerelease = $false }
 }
 
-function Install-NuGetProvider {
-    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install the NuGet provider.' }
+function Install-PowerShellModulePackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
 
-    $providerVersion = '2.8.5.208'
-    $providerPath = Get-NuGetProviderPath
-    if (Test-Path -LiteralPath $providerPath) {
-        return
-    }
+    $moduleDirectory = Join-Path $UserModuleRoot $Name
+    $versionDirectory = Join-Path $moduleDirectory $Version
+    $packagePath = Join-Path $DownloadDirectory "$Name.$Version.zip"
+    $packageUri = "https://www.powershellgallery.com/api/v2/package/$Name/$Version"
+    Save-RemoteFile -Uri $packageUri -Destination $packagePath
 
-    $providerDirectory = Split-Path -Parent $providerPath
-    New-Item -ItemType Directory -Path $providerDirectory -Force | Out-Null
-    $providerUri = 'https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll'
-    $webClient = New-Object Net.WebClient
-    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
+    $extractDirectory = Join-Path $DownloadDirectory ('module-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $extractDirectory -Force | Out-Null
     try {
-        $webClient.DownloadFile($providerUri, $providerPath)
+        Expand-Archive -LiteralPath $packagePath -DestinationPath $extractDirectory -Force
+        $manifest = Get-ChildItem -LiteralPath $extractDirectory -Filter "$Name.psd1" -Recurse |
+            Select-Object -First 1
+        if ($null -eq $manifest) {
+            throw "$Name.psd1 was not found in the downloaded package."
+        }
+        $sourceDirectory = $manifest.DirectoryName
+        if (Test-Path -LiteralPath $versionDirectory) {
+            Remove-Item -LiteralPath $versionDirectory -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $versionDirectory -Force | Out-Null
+        Copy-Item -Path (Join-Path $sourceDirectory '*') -Destination $versionDirectory -Recurse -Force
     }
     finally {
-        $webClient.Dispose()
+        if (Test-Path -LiteralPath $extractDirectory) {
+            Remove-Item -LiteralPath $extractDirectory -Recurse -Force
+        }
     }
-    if (-not (Test-Path -LiteralPath $providerPath)) {
-        throw 'NuGet provider installation failed: the current-user provider DLL was not installed.'
-    }
-}
 
-function Get-NuGetProviderPath {
-    return Join-Path $env:LOCALAPPDATA 'PackageManagement\ProviderAssemblies\NuGet\2.8.5.208\Microsoft.PackageManagement.NuGetProvider.dll'
+    foreach ($junkName in @('_rels', 'package', '[Content_Types].xml')) {
+        $junkPath = Join-Path $versionDirectory $junkName
+        if (Test-Path -LiteralPath $junkPath) {
+            Remove-Item -LiteralPath $junkPath -Recurse -Force
+        }
+    }
+    Get-ChildItem -LiteralPath $versionDirectory -Filter '*.nuspec' -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+    Get-ChildItem -LiteralPath $versionDirectory -Recurse -File -ErrorAction SilentlyContinue |
+        Unblock-File -ErrorAction SilentlyContinue
+
+    if (-not (Test-Path -LiteralPath (Join-Path $versionDirectory "$Name.psd1"))) {
+        throw "$Name installation failed: module manifest was not installed."
+    }
 }
 
 function Install-SecretManagement {
@@ -292,46 +497,20 @@ function Install-SecretStore {
     Install-PowerShellModulePackage -Name 'Microsoft.PowerShell.SecretStore' -Version ($Release.tag_name)
 }
 
-function Install-PowerShellModulePackage {
-    param(
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][string]$Version
-    )
-
-    $moduleDirectory = Join-Path (Get-CurrentUserModuleDirectory) $Name
-    $versionDirectory = Join-Path $moduleDirectory $Version
-    # NuGet packages are ZIP archives; Expand-Archive requires a .zip extension.
-    $packagePath = Join-Path $DownloadDirectory "$Name.$Version.zip"
-    $packageUri = "https://www.powershellgallery.com/api/v2/package/$Name/$Version"
-    $webClient = New-Object Net.WebClient
-    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
-    try {
-        $webClient.DownloadFile($packageUri, $packagePath)
-    }
-    finally {
-        $webClient.Dispose()
-    }
-    if (Test-Path -LiteralPath $versionDirectory) {
-        Remove-Item -LiteralPath $versionDirectory -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $moduleDirectory -Force | Out-Null
-    Expand-Archive -LiteralPath $packagePath -DestinationPath $versionDirectory -Force
-}
-
 function Configure-SecretStore {
-    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to configure SecretStore.' }
+    $env:PSModulePath = "$UserModuleRoot;$env:PSModulePath"
+    Remove-Module Microsoft.PowerShell.SecretStore, Microsoft.PowerShell.SecretManagement -Force -ErrorAction SilentlyContinue
+    Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop -Force
+    Import-Module Microsoft.PowerShell.SecretStore -ErrorAction Stop -Force
 
-    Update-ProcessEnvironment
-    $userModulePath = Get-CurrentUserModuleDirectory
-    if ($env:PSModulePath -notlike "*$userModulePath*") {
-        $env:PSModulePath = "$userModulePath;$env:PSModulePath"
+    $storeFile = Join-Path $env:LOCALAPPDATA 'Microsoft\PowerShell\secretmanagement\localstore\storefile'
+    if (-not (Test-Path -LiteralPath $storeFile)) {
+        Reset-SecretStore -Authentication None -Interaction None -Force -Confirm:$false -WarningAction SilentlyContinue -ErrorAction Stop
     }
-    Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
-    Import-Module Microsoft.PowerShell.SecretStore -ErrorAction Stop
+
     if ($null -eq (Get-SecretVault -Name SecretStore -ErrorAction SilentlyContinue)) {
         Register-SecretVault -Name SecretStore -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault -ErrorAction Stop
     }
-    Set-SecretStoreConfiguration -Authentication None -Interaction None -Scope CurrentUser -Confirm:$false -ErrorAction Stop
 }
 
 function Test-PackageNeedsInstallation {
@@ -368,50 +547,7 @@ function Save-ReleaseAsset {
 
     $target = Join-Path $Destination $asset.name
     Write-Host "Downloading $($asset.name) from $($Release.html_url)"
-    $webClient = New-Object Net.WebClient
-    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
-    try {
-        $webClient.DownloadFile($asset.browser_download_url, $target)
-    }
-    finally {
-        $webClient.Dispose()
-    }
-
-    # GitHub exposes a SHA-256 digest on newer API responses. Verify it when present.
-    if ($asset.digest -and $asset.digest -match '^sha256:([0-9a-fA-F]{64})$') {
-        $expected = $Matches[1].ToLowerInvariant()
-        $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $expected) {
-            throw "SHA-256 verification failed for $($asset.name)."
-        }
-        Write-Host "Verified SHA-256 for $($asset.name)"
-    }
-
-    return $target
-}
-
-function Save-ReleaseAssetByName {
-    param(
-        [Parameter(Mandatory = $true)]$Release,
-        [Parameter(Mandatory = $true)][string]$AssetName,
-        [Parameter(Mandatory = $true)][string]$Destination
-    )
-
-    $asset = @($Release.assets | Where-Object { $_.name -ceq $AssetName }) | Select-Object -First 1
-    if ($null -eq $asset) {
-        throw "Could not find the asset '$AssetName' in release $($Release.tag_name)."
-    }
-
-    $target = Join-Path $Destination $asset.name
-    Write-Host "Downloading $($asset.name) from $($Release.html_url)"
-    $webClient = New-Object Net.WebClient
-    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
-    try {
-        $webClient.DownloadFile($asset.browser_download_url, $target)
-    }
-    finally {
-        $webClient.Dispose()
-    }
+    Save-RemoteFile -Uri $asset.browser_download_url -Destination $target
 
     if ($asset.digest -and $asset.digest -match '^sha256:([0-9a-fA-F]{64})$') {
         $expected = $Matches[1].ToLowerInvariant()
@@ -428,13 +564,17 @@ function Save-ReleaseAssetByName {
 function Install-PowerShell {
     param([Parameter(Mandatory = $true)]$Release)
 
-    $release = $Release
-    $version = $release.tag_name -replace '^v', ''
-    $bundleName = "PowerShell-$version.msixbundle"
-    $bundle = Save-ReleaseAssetByName -Release $release -AssetName $bundleName -Destination $DownloadDirectory
-
-    Write-Host "Installing PowerShell $($release.tag_name) for the current user"
-    Add-AppxPackage -Path $bundle -DeferRegistrationWhenPackagesAreInUse
+    $architecture = Get-WindowsArchitecture
+    $archive = Save-ReleaseAsset -Release $Release -AssetPattern ("PowerShell-*-win-{0}.zip" -f $architecture) -Destination $DownloadDirectory
+    $version = $Release.tag_name -replace '^v', ''
+    $destination = Join-Path $PortablePowerShellRoot $version
+    Write-Host "Installing PowerShell $($Release.tag_name) for the current user"
+    Expand-ZipArchive -Archive $archive -Destination $destination
+    $pwsh = Join-Path $destination 'pwsh.exe'
+    if (-not (Test-RealExecutable -Path $pwsh)) {
+        throw 'PowerShell 7 installation failed: pwsh.exe was not installed.'
+    }
+    Add-UserPathEntry -PathEntry $destination
     Write-Host 'PowerShell 7 was installed.' -ForegroundColor Green
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         Start-InstallerInPowerShell7
@@ -442,8 +582,8 @@ function Install-PowerShell {
 }
 
 function Start-InstallerInPowerShell7 {
-    $pwsh = Join-Path $env:LOCALAPPDATA 'Programs\PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $pwsh)) {
+    $pwsh = Get-PwshExecutable
+    if (-not $pwsh) {
         throw 'PowerShell 7 was installed, but pwsh.exe could not be found.'
     }
 
@@ -452,8 +592,7 @@ function Start-InstallerInPowerShell7 {
     if ([string]::IsNullOrWhiteSpace($scriptPath)) {
         $scriptPath = Join-Path $env:TEMP ('aisetup-continue-' + [guid]::NewGuid().ToString('N') + '.ps1')
         Write-Host 'Downloading a temporary copy to continue under PowerShell 7.' -ForegroundColor Cyan
-        $scriptContent = (Invoke-WebRequest -UseBasicParsing $InstallerUrl).Content
-        [IO.File]::WriteAllText($scriptPath, $scriptContent, [Text.Encoding]::UTF8)
+        Save-RemoteFile -Uri $InstallerUrl -Destination $scriptPath
     }
     if ($scriptPath) {
         $arguments += @('-File', $scriptPath)
@@ -472,20 +611,18 @@ function Start-InstallerInPowerShell7 {
 }
 
 function Ensure-PowerShell7Execution {
-    if ($PSVersionTable.PSVersion.Major -ge 7) {
-        return
-    }
-
-    Write-Host 'PowerShell 5.x detected. Installing or switching to PowerShell 7 before package management.' -ForegroundColor Yellow
     $release = Get-LatestStableRelease -Repository $repositories.PowerShell
-    $installedVersion = Get-AppxInstalledVersion -PackageName 'Microsoft.PowerShell'
+    $installedVersion = Get-InstalledVersion -Name 'PowerShell'
     $needsInstall = $Reinstall -or $null -eq (ConvertTo-NormalizedVersion -Version $installedVersion) -or
         (ConvertTo-NormalizedVersion -Version $installedVersion) -lt (ConvertTo-NormalizedVersion -Version $release.tag_name)
 
     if ($needsInstall) {
+        Write-Host 'Installing current-user PowerShell 7 from the portable ZIP.' -ForegroundColor Yellow
         Install-PowerShell -Release $release
     }
-    else {
+
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Write-Host 'Switching to PowerShell 7 before package management.' -ForegroundColor Yellow
         Start-InstallerInPowerShell7
     }
 }
@@ -493,108 +630,55 @@ function Ensure-PowerShell7Execution {
 function Install-WindowsTerminal {
     param([Parameter(Mandatory = $true)]$Release)
 
-    $release = $Release
-    $installer = Save-ReleaseAsset -Release $release -AssetPattern 'Microsoft.WindowsTerminal_*.msixbundle' -Destination $DownloadDirectory
-
-    Write-Host "Installing Windows Terminal $($release.tag_name)"
-    Add-AppxPackage -Path $installer -DeferRegistrationWhenPackagesAreInUse
+    $installer = Save-ReleaseAsset -Release $Release -AssetPattern 'Microsoft.WindowsTerminal_*.msixbundle' -Destination $DownloadDirectory
+    Write-Host "Installing Windows Terminal $($Release.tag_name)"
+    try {
+        Add-AppxPackage -Path $installer -DeferRegistrationWhenPackagesAreInUse -ErrorAction Stop
+    }
+    catch {
+        Add-AppxPackage -Path $installer -DeferRegistrationWhenPackagesAreInUse -ForceUpdateFromAnyVersion
+    }
 }
 
 function Install-Git {
     param([Parameter(Mandatory = $true)]$Release)
 
-    $release = $Release
-    $archive = Save-ReleaseAsset -Release $release -AssetPattern 'PortableGit-*-64-bit.7z.exe' -Destination $DownloadDirectory
+    $archive = Save-ReleaseAsset -Release $Release -AssetPattern 'PortableGit-*-64-bit.7z.exe' -Destination $DownloadDirectory
     $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Git'
     $gitBinDirectory = Join-Path $installDirectory 'cmd'
 
-    Write-Host "Installing Git $($release.tag_name) for the current user"
+    Write-Host "Installing Git $($Release.tag_name) for the current user"
     New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
     $process = Start-Process -FilePath $archive -ArgumentList @("-o$installDirectory", '-y', '-bd') -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "Git extraction failed with exit code $($process.ExitCode)."
     }
-
-    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
-    if ($pathEntries -notcontains $gitBinDirectory) {
-        $pathEntries += $gitBinDirectory
-        [Environment]::SetEnvironmentVariable('Path', ($pathEntries -join ';'), 'User')
-    }
-    $env:Path = "$gitBinDirectory;$env:Path"
+    Add-UserPathEntry -PathEntry $gitBinDirectory
 }
 
 function Install-Node {
     param([Parameter(Mandatory = $true)]$Release)
 
-    $release = $Release
-    $architecture = if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
-        'arm64'
-    }
-    elseif ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64' -or $env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
-        'x64'
-    }
-    else {
-        throw 'Node.js installation requires x64 or ARM64 Windows.'
-    }
-    $version = $release.tag_name -replace '^v', ''
+    $architecture = Get-WindowsArchitecture
+    $version = $Release.tag_name -replace '^v', ''
     $archiveName = "node-v{0}-win-{1}.zip" -f $version, $architecture
     $archive = Join-Path $DownloadDirectory $archiveName
     $archiveUri = "https://nodejs.org/dist/v$version/$archiveName"
 
     Write-Host "Downloading $archiveName from $archiveUri"
-    $webClient = New-Object Net.WebClient
-    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
-    try {
-        $webClient.DownloadFile($archiveUri, $archive)
-    }
-    finally {
-        $webClient.Dispose()
-    }
+    Save-RemoteFile -Uri $archiveUri -Destination $archive
 
     $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\Node.js'
-    $extractDirectory = Join-Path $DownloadDirectory "node-extract-$version"
-    if (Test-Path -LiteralPath $extractDirectory) {
-        Remove-Item -LiteralPath $extractDirectory -Recurse -Force
-    }
-    Expand-Archive -LiteralPath $archive -DestinationPath $extractDirectory -Force
-    $extractedRoot = Join-Path $extractDirectory ("node-v{0}-win-{1}" -f $version, $architecture)
-    New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
-    Copy-Item -Path (Join-Path $extractedRoot '*') -Destination $installDirectory -Recurse -Force
-
-    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
-    if ($pathEntries -notcontains $installDirectory) {
-        $pathEntries += $installDirectory
-        [Environment]::SetEnvironmentVariable('Path', ($pathEntries -join ';'), 'User')
-    }
-}
-
-function Add-UserPathEntry {
-    param([Parameter(Mandatory = $true)][string]$PathEntry)
-
-    $normalizedEntry = ($PathEntry -replace '/', '\').TrimEnd('\')
-    $pathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' |
-        Where-Object {
-            $candidate = ($_ -replace '/', '\').TrimEnd('\')
-            $_ -and $candidate -ine $normalizedEntry
-        }
-    $newPathEntries = @($PathEntry) + @($pathEntries)
-    [Environment]::SetEnvironmentVariable('Path', ($newPathEntries -join ';'), 'User')
-    Update-ProcessEnvironment
+    Expand-ZipArchive -Archive $archive -Destination $installDirectory
+    Add-UserPathEntry -PathEntry $installDirectory
 }
 
 function Install-Uv {
     param([Parameter(Mandatory = $true)]$Release)
 
-    $architecture = if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
-        'aarch64'
-    }
-    elseif ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64' -or $env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
-        'x86_64'
-    }
-    else {
-        throw 'uv installation requires x64 or ARM64 Windows.'
-    }
-    $archive = Save-ReleaseAsset -Release $Release -AssetPattern ("uv-{0}-pc-windows-msvc.zip" -f $architecture) -Destination $DownloadDirectory
+    $architecture = Get-WindowsArchitecture
+    $uvArchitecture = if ($architecture -eq 'arm64') { 'aarch64' } else { 'x86_64' }
+    $archive = Save-ReleaseAsset -Release $Release -AssetPattern ("uv-{0}-pc-windows-msvc.zip" -f $uvArchitecture) -Destination $DownloadDirectory
     $extractDirectory = Join-Path $DownloadDirectory 'uv-extract'
     if (Test-Path -LiteralPath $extractDirectory) { Remove-Item -LiteralPath $extractDirectory -Recurse -Force }
     Expand-Archive -LiteralPath $archive -DestinationPath $extractDirectory -Force
@@ -609,7 +693,7 @@ function Install-Uv {
 function Install-OpenCode {
     param([Parameter(Mandatory = $true)]$Release)
 
-    $architecture = if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+    $architecture = Get-WindowsArchitecture
     $archive = Save-ReleaseAsset -Release $Release -AssetPattern ("opencode-windows-{0}.zip" -f $architecture) -Destination $DownloadDirectory
     $extractDirectory = Join-Path $DownloadDirectory 'opencode-extract'
     if (Test-Path -LiteralPath $extractDirectory) { Remove-Item -LiteralPath $extractDirectory -Recurse -Force }
@@ -638,15 +722,26 @@ function Install-Herdr {
     Set-HerdrDefaultShell
 }
 
+function ConvertTo-TomlString {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $normalized = $Value.Replace('\', '/')
+    return '"' + $normalized.Replace('"', '\"') + '"'
+}
+
 function Set-HerdrDefaultShell {
+    $pwsh = Get-PwshExecutable
+    if (-not $pwsh) {
+        Write-Host 'Skipping Herdr default shell: a real pwsh.exe was not found.' -ForegroundColor Yellow
+        return
+    }
+
     $configDirectory = Join-Path $env:APPDATA 'herdr'
     $configPath = Join-Path $configDirectory 'config.toml'
-    $terminalConfig = @'
+    $shellAssignment = 'default_shell = ' + (ConvertTo-TomlString -Value $pwsh)
+    $terminalConfig = @"
 [terminal]
-# Executable used for new interactive panes.
-# Empty means $SHELL, then /bin/sh.
-default_shell = "pwsh.exe"
-'@
+$shellAssignment
+"@
 
     New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
     if (-not (Test-Path -LiteralPath $configPath)) {
@@ -656,13 +751,13 @@ default_shell = "pwsh.exe"
 
     $config = Get-Content -LiteralPath $configPath -Raw
     if ($config -match '(?m)^\s*default_shell\s*=') {
-        $config = [regex]::Replace($config, '(?m)^\s*default_shell\s*=.*$', 'default_shell = "pwsh.exe"')
+        $config = [regex]::Replace($config, '(?m)^\s*default_shell\s*=.*$', $shellAssignment)
     }
     elseif ($config -match '(?m)^\[terminal\]\s*$') {
         $config = [regex]::Replace(
             $config,
-            '(?ms)(^\[terminal\]\s*\r?\n)(.*?)(?=^\[|\z)',
-            ('$1$2' + "# Executable used for new interactive panes.`r`n# Empty means `$SHELL, then /bin/sh.`r`ndefault_shell = `"pwsh.exe`"`r`n")
+            '(?m)^\[terminal\]\s*$',
+            "[terminal]`r`n$shellAssignment"
         )
     }
     else {
@@ -675,8 +770,10 @@ function Set-PowerShellProfileEntries {
     $profilePath = $PROFILE.CurrentUserAllHosts
     $profileDirectory = Split-Path -Parent $profilePath
     $profileEntries = @(
+        '$aisetupModulePath = Join-Path $env:LOCALAPPDATA ''PowerShell\Modules'''
+        'if ($env:PSModulePath -notlike "*$aisetupModulePath*") { $env:PSModulePath = "$aisetupModulePath;$env:PSModulePath" }'
         '$env:NETAPP_OPENCODE_USER = $env:USERNAME'
-        '$env:NETAPP_OPENCODE_API_KEY = try { $(get-secret NETAPP_OPENCODE_API_KEY -AsPlainText -ErrorAction SilentlyContinue) } catch { $null }'
+        '$env:NETAPP_OPENCODE_API_KEY = try { $(Get-Secret NETAPP_OPENCODE_API_KEY -AsPlainText -ErrorAction SilentlyContinue) } catch { $null }'
     )
 
     New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null
@@ -732,14 +829,8 @@ function Invoke-PackageInstallation {
 }
 
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path $UserModuleRoot -Force | Out-Null
 Ensure-PowerShell7Execution
-
-try {
-    Install-NuGetProvider
-}
-catch {
-    throw "NuGet provider installation failed: $($_.Exception.Message)"
-}
 
 $packages = @(
     [pscustomobject]@{ Name = 'PowerShell'; Repository = $repositories.PowerShell; Installer = { param($release) Install-PowerShell -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
@@ -791,14 +882,32 @@ $totalPackages = $packagesToInstall.Count
 $packageNumber = 0
 $results = @(
     foreach ($package in $packagesToInstall) {
-    $packageNumber++
-    Invoke-PackageInstallation -Name $package.Name -Installer $package.Installer -Number $packageNumber -Total $totalPackages -ArgumentList @($package.Release)
+        $packageNumber++
+        Invoke-PackageInstallation -Name $package.Name -Installer $package.Installer -Number $packageNumber -Total $totalPackages -ArgumentList @($package.Release)
     }
 )
 
 $results += $preflightFailed | ForEach-Object {
     [pscustomobject]@{ Name = $_.Name; Status = 'Failed'; Details = $_.PreflightError; Time = 'n/a' }
 }
+
+Update-ProcessEnvironment
+Set-PreferredToolPathEntries
+Update-ProcessEnvironment
+Write-Host 'Environment variables refreshed.' -ForegroundColor Green
+
+if (Test-RealExecutable -Path (Join-Path $env:LOCALAPPDATA 'Programs\Herdr\herdr.exe')) {
+    Set-HerdrDefaultShell
+    $pwsh = Get-PwshExecutable
+    if ($pwsh) {
+        Write-Host "Herdr default shell configured as $pwsh." -ForegroundColor Green
+    }
+}
+
+Set-PowerShellProfileEntries
+Write-Host 'PowerShell profile entries configured.' -ForegroundColor Green
+
+$results += Invoke-PackageInstallation -Name 'SecretStore vault' -Installer { Configure-SecretStore } -Number 1 -Total 1
 
 Write-Host "`nInstallation Summary" -ForegroundColor Cyan
 Write-Host '--------------------' -ForegroundColor DarkGray
@@ -814,26 +923,8 @@ else {
     $failed | ForEach-Object { Write-Host "       - $($_.Name): $($_.Details)" -ForegroundColor DarkRed }
 }
 
-Update-ProcessEnvironment
-Set-PreferredToolPathEntries
-Update-ProcessEnvironment
-Write-Host 'Environment variables refreshed.' -ForegroundColor Green
-
-$herdrPackage = @($packages | Where-Object { $_.Name -eq 'Herdr' -and -not $_.PreflightError -and $_.InstalledVersion })
-if ($herdrPackage.Count -gt 0) {
-    Set-HerdrDefaultShell
-    Write-Host 'Herdr default shell configured as pwsh.exe.' -ForegroundColor Green
-}
-
-Set-PowerShellProfileEntries
-Write-Host 'PowerShell profile entries configured.' -ForegroundColor Green
-
-try {
-    Configure-SecretStore
-    Write-Host 'SecretStore vault configured.' -ForegroundColor Green
-}
-catch {
-    Write-Host "[FAIL] SecretStore configuration: $($_.Exception.Message)" -ForegroundColor Red
-}
-
 Wait-ForInstallerExit
+if ($failed.Count -gt 0) {
+    exit 1
+}
+exit 0
