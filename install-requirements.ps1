@@ -225,12 +225,32 @@ function Get-PowerShellModuleInstalledVersion {
     return $module.Version.ToString()
 }
 
+function Get-CurrentUserModuleDirectory {
+    $profileRoot = [IO.Path]::GetFullPath($HOME).TrimEnd('\')
+    $moduleDirectory = $env:PSModulePath -split ';' |
+        Where-Object {
+            if ([string]::IsNullOrWhiteSpace($_)) { return $false }
+            $candidate = [IO.Path]::GetFullPath($_).TrimEnd('\')
+            $candidate.StartsWith($profileRoot, [StringComparison]::OrdinalIgnoreCase) -and
+                $candidate -match '\\Documents\\(PowerShell|WindowsPowerShell)\\Modules$'
+        } |
+        Select-Object -First 1
+    if ($moduleDirectory) { return $moduleDirectory }
+    return (Join-Path $HOME 'Documents\PowerShell\Modules')
+}
+
 function Get-LatestPowerShellModuleRelease {
     param([Parameter(Mandatory = $true)][string]$Name)
 
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to query the PowerShell Gallery.' }
-    $module = Find-Module -Name $Name -Repository PSGallery -ErrorAction Stop
-    return [pscustomobject]@{ tag_name = $module.Version.ToString(); draft = $false; prerelease = $false }
+    $uri = "https://www.powershellgallery.com/api/v2/FindPackagesById()?id='$Name'"
+    $packages = Invoke-RestMethod -Uri $uri -UseBasicParsing -ErrorAction Stop
+    $versions = @($packages | ForEach-Object {
+        $version = $_.properties.Version
+        if ($version) { ConvertTo-NormalizedVersion -Version ([string]$version) }
+    } | Where-Object { $null -ne $_ } | Sort-Object -Descending)
+    if ($versions.Count -eq 0) { throw "Could not find $Name in the PowerShell Gallery." }
+    return [pscustomobject]@{ tag_name = $versions[0].ToString(); draft = $false; prerelease = $false }
 }
 
 function Install-NuGetProvider {
@@ -263,27 +283,55 @@ function Get-NuGetProviderPath {
 }
 
 function Install-SecretManagement {
-    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretManagement.' }
-    Install-Module -Name 'Microsoft.PowerShell.SecretManagement' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+    param([Parameter(Mandatory = $true)]$Release)
+    Install-PowerShellModulePackage -Name 'Microsoft.PowerShell.SecretManagement' -Version ($Release.tag_name)
 }
 
 function Install-SecretStore {
-    if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install Microsoft.PowerShell.SecretStore.' }
-    Install-Module -Name 'Microsoft.PowerShell.SecretStore' -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+    param([Parameter(Mandatory = $true)]$Release)
+    Install-PowerShellModulePackage -Name 'Microsoft.PowerShell.SecretStore' -Version ($Release.tag_name)
+}
+
+function Install-PowerShellModulePackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    $moduleDirectory = Join-Path (Get-CurrentUserModuleDirectory) $Name
+    $versionDirectory = Join-Path $moduleDirectory $Version
+    # NuGet packages are ZIP archives; Expand-Archive requires a .zip extension.
+    $packagePath = Join-Path $DownloadDirectory "$Name.$Version.zip"
+    $packageUri = "https://www.powershellgallery.com/api/v2/package/$Name/$Version"
+    $webClient = New-Object Net.WebClient
+    $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
+    try {
+        $webClient.DownloadFile($packageUri, $packagePath)
+    }
+    finally {
+        $webClient.Dispose()
+    }
+    if (Test-Path -LiteralPath $versionDirectory) {
+        Remove-Item -LiteralPath $versionDirectory -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $moduleDirectory -Force | Out-Null
+    Expand-Archive -LiteralPath $packagePath -DestinationPath $versionDirectory -Force
 }
 
 function Configure-SecretStore {
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to configure SecretStore.' }
 
-    $commandText = @'
-Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
-Import-Module Microsoft.PowerShell.SecretStore -ErrorAction Stop
-if ($null -eq (Get-SecretVault -Name SecretStore -ErrorAction SilentlyContinue)) {
-    Register-SecretVault -Name SecretStore -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault -ErrorAction Stop
-}
-Set-SecretStoreConfiguration -Authentication None -Interaction None -Scope CurrentUser -Confirm:$false -ErrorAction Stop
-'@
-    Invoke-Expression $commandText
+    Update-ProcessEnvironment
+    $userModulePath = Get-CurrentUserModuleDirectory
+    if ($env:PSModulePath -notlike "*$userModulePath*") {
+        $env:PSModulePath = "$userModulePath;$env:PSModulePath"
+    }
+    Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
+    Import-Module Microsoft.PowerShell.SecretStore -ErrorAction Stop
+    if ($null -eq (Get-SecretVault -Name SecretStore -ErrorAction SilentlyContinue)) {
+        Register-SecretVault -Name SecretStore -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault -ErrorAction Stop
+    }
+    Set-SecretStoreConfiguration -Authentication None -Interaction None -Scope CurrentUser -Confirm:$false -ErrorAction Stop
 }
 
 function Test-PackageNeedsInstallation {
@@ -590,27 +638,6 @@ function Install-Herdr {
     Set-HerdrDefaultShell
 }
 
-function Stop-RunningHerdr {
-    $herdr = Get-Command herdr.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $herdr) {
-        return
-    }
-
-    Write-Host 'Stopping running Herdr processes before reinstall.' -ForegroundColor Yellow
-    & $herdr.Source server stop 2>$null | Out-Null
-
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    do {
-        Start-Sleep -Milliseconds 250
-        $running = @(Get-Process -Name 'herdr' -ErrorAction SilentlyContinue)
-        if ($running.Count -eq 0) {
-            return
-        }
-    } while ([DateTime]::UtcNow -lt $deadline)
-
-    throw 'Herdr server did not stop within 10 seconds.'
-}
-
 function Set-HerdrDefaultShell {
     $configDirectory = Join-Path $env:APPDATA 'herdr'
     $configPath = Join-Path $configDirectory 'config.toml'
@@ -722,8 +749,8 @@ $packages = @(
     [pscustomobject]@{ Name = 'uv'; Repository = $repositories.Uv; Installer = { param($release) Install-Uv -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
     [pscustomobject]@{ Name = 'OpenCode'; Repository = $repositories.OpenCode; Installer = { param($release) Install-OpenCode -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
     [pscustomobject]@{ Name = 'Herdr'; Repository = $repositories.Herdr; Installer = { param($release) Install-Herdr -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
-    [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretManagement'; Repository = $null; Installer = { param($release) Install-SecretManagement }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
-    [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretStore'; Repository = $null; Installer = { param($release) Install-SecretStore }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretManagement'; Repository = $null; Installer = { param($release) Install-SecretManagement -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
+    [pscustomobject]@{ Name = 'Microsoft.PowerShell.SecretStore'; Repository = $null; Installer = { param($release) Install-SecretStore -Release $release }; Release = $null; InstalledVersion = $null; LatestVersion = $null; NeedsInstall = $false; PreflightError = $null }
 )
 
 $preflightFailed = @()
@@ -760,9 +787,6 @@ foreach ($package in $packages) {
 }
 
 $packagesToInstall = @($packages | Where-Object { $_.NeedsInstall -and -not $_.PreflightError })
-if ($Reinstall -and @($packagesToInstall | Where-Object { $_.Name -eq 'Herdr' }).Count -gt 0) {
-    Stop-RunningHerdr
-}
 $totalPackages = $packagesToInstall.Count
 $packageNumber = 0
 $results = @(
