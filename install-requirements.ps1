@@ -237,6 +237,13 @@ function Get-LatestPowerShellModuleRelease {
 function Install-NuGetProvider {
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required to install the NuGet provider.' }
 
+    $providerVersion = '2.8.5.208'
+    $providerDirectory = Join-Path $env:LOCALAPPDATA "PackageManagement\ProviderAssemblies\NuGet\$providerVersion"
+    $providerPath = Join-Path $providerDirectory 'Microsoft.PackageManagement.NuGetProvider.dll'
+    if (Test-Path -LiteralPath $providerPath) {
+        return
+    }
+
     $packageManagementTemp = Join-Path $env:TEMP ('aisetup-packagemanagement-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $packageManagementTemp -Force | Out-Null
     Remove-Item -LiteralPath (Join-Path $env:TEMP 'Microsoft.PackageManagement') -Recurse -Force -ErrorAction SilentlyContinue
@@ -250,13 +257,28 @@ if ($null -eq $provider) {
 '@
     $commandText = $commandText.Replace('__PACKAGE_MANAGEMENT_TEMP__', $packageManagementTemp.Replace("'", "''"))
     try {
-        Invoke-Expression $commandText
+        try {
+            Invoke-Expression $commandText
+        }
+        catch {
+            Write-Host 'PackageManagement bootstrap failed; downloading the NuGet provider directly.' -ForegroundColor Yellow
+            New-Item -ItemType Directory -Path $providerDirectory -Force | Out-Null
+            $providerUri = 'https://onegetcdn.azureedge.net/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll'
+            $webClient = New-Object Net.WebClient
+            $webClient.Headers['User-Agent'] = 'WindowsPowerShell-requirements-installer'
+            try {
+                $webClient.DownloadFile($providerUri, $providerPath)
+            }
+            finally {
+                $webClient.Dispose()
+            }
+        }
     }
     finally {
         Remove-Item -LiteralPath $packageManagementTemp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "NuGet provider installation failed with exit code $LASTEXITCODE."
+    if (-not (Test-Path -LiteralPath $providerPath)) {
+        throw 'NuGet provider installation failed: the provider DLL was not installed.'
     }
 }
 
