@@ -21,8 +21,9 @@ function Wait-ForInstallerExit {
 }
 
 trap {
+    Write-Error $_
     Wait-ForInstallerExit
-    exit 1
+    break
 }
 
 function Update-ProcessEnvironment {
